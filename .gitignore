@@ -6,8 +6,11 @@ __pycache__/
 can/
 demo_inputs/
 demo_outputs_patchcore/
+demo_outputs_efficientad/
 venv/
 env/
 *.log
 results/
 runs_patchcore/
+runs_efficientad/
+datasets/

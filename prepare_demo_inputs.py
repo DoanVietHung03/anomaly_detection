@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import shutil
 from pathlib import Path
@@ -48,12 +49,30 @@ def copy_paths(paths: list[Path], out_dir: Path, prefix: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for idx, src in enumerate(paths):
         dst = out_dir / f"{idx:03d}_{prefix}_{src.name}"
+        if dst.exists():
+            dst.chmod(0o666)
         shutil.copy2(src, dst)
+        dst.chmod(0o666)
 
 
-def reset_generated_dir(path: Path) -> None:
-    if path.exists():
-        shutil.rmtree(path)
+def reset_generated_files(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    for file_path in list_images(path):
+        try:
+            file_path.chmod(0o666)
+            file_path.unlink()
+        except PermissionError as exc:
+            raise SystemExit(
+                f"Could not clean locked demo input file: {file_path}\n"
+                "Close any image viewer, Explorer preview, browser report tab, or editor preview using this file, then retry."
+            ) from exc
+    for child in sorted(path.iterdir(), reverse=True):
+        if child.is_dir():
+            try:
+                child.chmod(0o777)
+                os.rmdir(child)
+            except OSError:
+                pass
 
 
 def main() -> None:
@@ -83,8 +102,8 @@ def main() -> None:
     good_out = args.output_dir / "good"
     bad_out = args.output_dir / "bad"
     if args.clean:
-        reset_generated_dir(good_out)
-        reset_generated_dir(bad_out)
+        reset_generated_files(good_out)
+        reset_generated_files(bad_out)
 
     copy_paths(sampled_good, good_out, "good")
     copy_paths(sampled_bad, bad_out, "bad")
