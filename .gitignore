@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+*.pyd
+can/
+demo_inputs/
+demo_outputs_patchcore/
+venv/
+env/
+*.log
+results/
+runs_patchcore/

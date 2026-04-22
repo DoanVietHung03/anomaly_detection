@@ -1,0 +1,5 @@
+anomalib[cu118]>=2.3,<3
+pandas>=2,<3
+pillow>=10.0
+opencv-python>=4.8
+numpy>=2.0

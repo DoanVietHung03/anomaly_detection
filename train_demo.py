@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Train an anomaly detection demo on MVTec AD 2 / can.
+
+This script focuses on a minimal, reproducible training flow for:
+- PatchCore
+- EfficientAD
+
+It trains on defect-free data and evaluates on the public test split.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train MVTec AD 2 demo model.")
+    parser.add_argument("--dataset-root", type=Path, required=True, help="Path to MVTec_AD_2 root.")
+    parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="patchcore",
+        choices=["patchcore", "efficientad"],
+        help="Model to train.",
+    )
+    parser.add_argument("--results-dir", type=Path, default=Path("./runs"), help="Output directory.")
+    parser.add_argument("--epochs", type=int, default=30, help="Training epochs.")
+    parser.add_argument("--train-batch-size", type=int, default=4, help="Override train batch size.")
+    parser.add_argument("--eval-batch-size", type=int, default=4, help="Eval/test batch size.")
+    parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
+    parser.add_argument(
+        "--test-type",
+        type=str,
+        default="public",
+        choices=["public", "private", "private_mixed"],
+        help="Which MVTec AD 2 test split to use.",
+    )
+    parser.add_argument(
+        "--accelerator",
+        type=str,
+        default="gpu",
+        help="Lightning accelerator, e.g. auto/cpu/gpu.",
+    )
+    parser.add_argument(
+        "--devices",
+        type=str,
+        default="1",
+        help="Lightning devices value, e.g. auto/1/[0].",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    return parser.parse_args()
+
+
+def import_dependencies() -> tuple[Any, Any, Any, Any]:
+    try:
+        from anomalib.data import MVTecAD2
+        from anomalib.engine import Engine
+        from anomalib.models import EfficientAd, Patchcore
+        from lightning.pytorch import seed_everything
+    except Exception as exc:  # pragma: no cover - runtime safeguard
+        raise SystemExit(
+            "Failed to import Anomalib stack. Install dependencies first, for example:\n"
+            "  python -m pip install -r requirements.txt\n"
+            f"Original error: {exc}"
+        ) from exc
+    return MVTecAD2, Engine, (Patchcore, EfficientAd), seed_everything
+
+
+def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any) -> Any:
+    if model_name == "patchcore":
+        return patchcore_cls(
+            backbone="wide_resnet50_2",
+            layers=("layer2", "layer3"),
+            coreset_sampling_ratio=0.1,
+            num_neighbors=9,
+        )
+    if model_name == "efficientad":
+        return efficientad_cls()
+    raise ValueError(f"Unsupported model: {model_name}")
+
+
+def normalize_mask_paths(dataset: Any) -> None:
+    """Convert pandas NaN mask paths from MVTecAD2 into real None values."""
+    samples = getattr(dataset, "samples", None)
+    if samples is None or "mask_path" not in samples.columns:
+        return
+
+    import pandas as pd
+
+    samples = samples.copy()
+    samples["mask_path"] = samples["mask_path"].astype("object").where(pd.notna(samples["mask_path"]), None)
+    dataset.samples = samples
+
+
+def make_safe_mvtec_ad2_cls(mvtec_ad2_cls: Any) -> Any:
+    class SafeMVTecAD2(mvtec_ad2_cls):
+        def _setup(self, *args: Any, **kwargs: Any) -> None:
+            super()._setup(*args, **kwargs)
+            for dataset_name in (
+                "train_data",
+                "val_data",
+                "test_data",
+                "test_public_data",
+                "test_private_data",
+                "test_private_mixed_data",
+            ):
+                normalize_mask_paths(getattr(self, dataset_name, None))
+
+    return SafeMVTecAD2
+
+
+def find_best_checkpoint(results_dir: Path) -> str | None:
+    checkpoint_candidates = sorted(results_dir.rglob("*.ckpt"))
+    if not checkpoint_candidates:
+        return None
+
+    preferred = [p for p in checkpoint_candidates if "best" in p.name.lower() or "model" in p.name.lower()]
+    if preferred:
+        return str(preferred[0].resolve())
+    return str(checkpoint_candidates[0].resolve())
+
+
+def make_json_safe(obj: Any) -> Any:
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {str(k): make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [make_json_safe(v) for v in obj]
+    return str(obj)
+
+
+def main() -> None:
+    args = parse_args()
+    mvtec_ad2_cls, engine_cls, model_classes, seed_everything = import_dependencies()
+    patchcore_cls, efficient_ad_cls = model_classes
+    safe_mvtec_ad2_cls = make_safe_mvtec_ad2_cls(mvtec_ad2_cls)
+
+    args.results_dir.mkdir(parents=True, exist_ok=True)
+    seed_everything(args.seed, workers=True)
+
+    train_batch_size = args.train_batch_size
+    if train_batch_size is None:
+        train_batch_size = 1 if args.model == "efficientad" else 8
+
+    datamodule = safe_mvtec_ad2_cls(
+        root=args.dataset_root,
+        category=args.category,
+        train_batch_size=train_batch_size,
+        eval_batch_size=args.eval_batch_size,
+        num_workers=args.num_workers,
+        test_type=args.test_type,
+        seed=args.seed,
+    )
+
+    model = build_model(args.model, patchcore_cls, efficient_ad_cls)
+
+    engine = engine_cls(
+        default_root_dir=str(args.results_dir),
+        max_epochs=args.epochs,
+        accelerator=args.accelerator,
+        devices=args.devices,
+    )
+
+    print("=" * 80)
+    print("[INFO] Starting training")
+    print(f"[INFO] dataset_root: {args.dataset_root}")
+    print(f"[INFO] category    : {args.category}")
+    print(f"[INFO] model       : {args.model}")
+    print(f"[INFO] test_type   : {args.test_type}")
+    print(f"[INFO] results_dir : {args.results_dir}")
+    print("=" * 80)
+
+    engine.fit(model=model, datamodule=datamodule)
+
+    print("[INFO] Training complete. Running test on selected split...")
+    try:
+        test_results = engine.test(model=model, datamodule=datamodule, ckpt_path="best")
+    except Exception:
+        test_results = engine.test(model=model, datamodule=datamodule)
+
+    best_checkpoint = None
+    try:
+        checkpoint_callback = getattr(engine.trainer, "checkpoint_callback", None)
+        if checkpoint_callback is not None:
+            best_checkpoint = getattr(checkpoint_callback, "best_model_path", None) or None
+    except Exception:
+        best_checkpoint = None
+
+    if not best_checkpoint:
+        best_checkpoint = find_best_checkpoint(args.results_dir)
+
+    metadata = {
+        "dataset_root": args.dataset_root,
+        "category": args.category,
+        "model": args.model,
+        "epochs": args.epochs,
+        "train_batch_size": train_batch_size,
+        "eval_batch_size": args.eval_batch_size,
+        "num_workers": args.num_workers,
+        "test_type": args.test_type,
+        "accelerator": args.accelerator,
+        "devices": args.devices,
+        "seed": args.seed,
+        "best_checkpoint": best_checkpoint,
+        "test_results": test_results,
+    }
+
+    metadata_path = args.results_dir / f"train_summary_{args.model}_{args.category}.json"
+    with metadata_path.open("w", encoding="utf-8") as f:
+        json.dump(make_json_safe(metadata), f, indent=2, ensure_ascii=False)
+
+    print("=" * 80)
+    print("[INFO] Done")
+    print(f"[INFO] Summary JSON : {metadata_path}")
+    print(f"[INFO] Best checkpoint: {best_checkpoint}")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
+    main()
