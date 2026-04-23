@@ -16,6 +16,25 @@ import os
 from pathlib import Path
 from typing import Any
 
+try:
+    from anomalib.data import MVTecAD2 as _MVTecAD2Base
+except Exception:  # pragma: no cover - import_dependencies handles the runtime error message.
+    _MVTecAD2Base = object
+
+
+class SafeMVTecAD2(_MVTecAD2Base):
+    def _setup(self, *args: Any, **kwargs: Any) -> None:
+        super()._setup(*args, **kwargs)
+        for dataset_name in (
+            "train_data",
+            "val_data",
+            "test_data",
+            "test_public_data",
+            "test_private_data",
+            "test_private_mixed_data",
+        ):
+            normalize_mask_paths(getattr(self, dataset_name, None))
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train MVTec AD 2 demo model.")
@@ -104,19 +123,8 @@ def normalize_mask_paths(dataset: Any) -> None:
 
 
 def make_safe_mvtec_ad2_cls(mvtec_ad2_cls: Any) -> Any:
-    class SafeMVTecAD2(mvtec_ad2_cls):
-        def _setup(self, *args: Any, **kwargs: Any) -> None:
-            super()._setup(*args, **kwargs)
-            for dataset_name in (
-                "train_data",
-                "val_data",
-                "test_data",
-                "test_public_data",
-                "test_private_data",
-                "test_private_mixed_data",
-            ):
-                normalize_mask_paths(getattr(self, dataset_name, None))
-
+    if not issubclass(SafeMVTecAD2, mvtec_ad2_cls):
+        raise SystemExit("SafeMVTecAD2 base class mismatch. Restart the Python process and try again.")
     return SafeMVTecAD2
 
 
