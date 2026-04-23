@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-batch-size", type=int, default=None, help="Training batch size.")
     parser.add_argument("--eval-batch-size", type=int, default=8, help="Eval/test batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
-    parser.add_argument("--image-size", type=int, default=256, help="Inference image size.")
+    parser.add_argument("--image-size", type=int, default=256, help="Training and inference image size.")
     parser.add_argument("--accelerator", type=str, default="gpu", help="Lightning accelerator.")
     parser.add_argument("--devices", type=str, default="1", help="Lightning devices value.")
     parser.add_argument("--check-only", action="store_true", help="Only validate environment and dataset, then exit.")
@@ -201,6 +201,8 @@ def main() -> None:
             str(train_batch_size),
             "--eval-batch-size",
             str(args.eval_batch_size),
+            "--image-size",
+            str(args.image_size),
             "--num-workers",
             str(args.num_workers),
             "--accelerator",
@@ -240,6 +242,10 @@ def main() -> None:
             str(results_dir),
             "--model",
             args.model,
+            "--dataset-root",
+            str(dataset_root),
+            "--category",
+            args.category,
             "--output-dir",
             str(output_dir),
             "--image-size",

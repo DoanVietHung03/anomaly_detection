@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=30, help="Training epochs.")
     parser.add_argument("--train-batch-size", type=int, default=4, help="Override train batch size.")
     parser.add_argument("--eval-batch-size", type=int, default=4, help="Eval/test batch size.")
+    parser.add_argument("--image-size", type=int, default=256, help="Square image size for model preprocessing.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
     parser.add_argument(
         "--test-type",
@@ -56,31 +57,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_dependencies() -> tuple[Any, Any, Any, Any]:
+def import_dependencies() -> tuple[Any, Any, Any, Any, Any]:
     try:
         from anomalib.data import MVTecAD2
         from anomalib.engine import Engine
         from anomalib.models import EfficientAd, Patchcore
         from lightning.pytorch import seed_everything
+        from lightning.pytorch.loggers import CSVLogger
     except Exception as exc:  # pragma: no cover - runtime safeguard
         raise SystemExit(
             "Failed to import Anomalib stack. Install dependencies first, for example:\n"
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return MVTecAD2, Engine, (Patchcore, EfficientAd), seed_everything
+    return MVTecAD2, Engine, (Patchcore, EfficientAd), seed_everything, CSVLogger
 
 
-def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any) -> Any:
+def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: int) -> Any:
+    pre_processor_size = (image_size, image_size)
     if model_name == "patchcore":
         return patchcore_cls(
             backbone="wide_resnet50_2",
             layers=("layer2", "layer3"),
             coreset_sampling_ratio=0.1,
             num_neighbors=9,
+            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     if model_name == "efficientad":
-        return efficientad_cls()
+        return efficientad_cls(
+            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
     raise ValueError(f"Unsupported model: {model_name}")
 
 
@@ -139,12 +145,14 @@ def make_json_safe(obj: Any) -> Any:
 
 def main() -> None:
     args = parse_args()
-    mvtec_ad2_cls, engine_cls, model_classes, seed_everything = import_dependencies()
+    mvtec_ad2_cls, engine_cls, model_classes, seed_everything, csv_logger_cls = import_dependencies()
     patchcore_cls, efficient_ad_cls = model_classes
     safe_mvtec_ad2_cls = make_safe_mvtec_ad2_cls(mvtec_ad2_cls)
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     seed_everything(args.seed, workers=True)
+    if args.image_size <= 0:
+        raise SystemExit("--image-size must be a positive integer.")
 
     train_batch_size = args.train_batch_size
     if train_batch_size is None:
@@ -160,13 +168,18 @@ def main() -> None:
         seed=args.seed,
     )
 
-    model = build_model(args.model, patchcore_cls, efficient_ad_cls)
+    model = build_model(args.model, patchcore_cls, efficient_ad_cls, args.image_size)
+    csv_logger = csv_logger_cls(
+        save_dir=str(args.results_dir / "logs"),
+        name=f"{args.model}_{args.category}",
+    )
 
     engine = engine_cls(
         default_root_dir=str(args.results_dir),
         max_epochs=args.epochs,
         accelerator=args.accelerator,
         devices=args.devices,
+        logger=csv_logger,
     )
 
     print("=" * 80)
@@ -174,6 +187,7 @@ def main() -> None:
     print(f"[INFO] dataset_root: {args.dataset_root}")
     print(f"[INFO] category    : {args.category}")
     print(f"[INFO] model       : {args.model}")
+    print(f"[INFO] image_size  : {args.image_size}")
     print(f"[INFO] test_type   : {args.test_type}")
     print(f"[INFO] results_dir : {args.results_dir}")
     print("=" * 80)
@@ -197,11 +211,14 @@ def main() -> None:
     if not best_checkpoint:
         best_checkpoint = find_best_checkpoint(args.results_dir)
 
+    metrics_csv = Path(csv_logger.log_dir) / "metrics.csv"
+
     metadata = {
         "dataset_root": args.dataset_root,
         "category": args.category,
         "model": args.model,
         "epochs": args.epochs,
+        "image_size": args.image_size,
         "train_batch_size": train_batch_size,
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,
@@ -210,6 +227,7 @@ def main() -> None:
         "devices": args.devices,
         "seed": args.seed,
         "best_checkpoint": best_checkpoint,
+        "metrics_csv": metrics_csv if metrics_csv.exists() else None,
         "test_results": test_results,
     }
 
@@ -221,6 +239,7 @@ def main() -> None:
     print("[INFO] Done")
     print(f"[INFO] Summary JSON : {metadata_path}")
     print(f"[INFO] Best checkpoint: {best_checkpoint}")
+    print(f"[INFO] Metrics CSV    : {metrics_csv if metrics_csv.exists() else 'not written'}")
     print("=" * 80)
 
 

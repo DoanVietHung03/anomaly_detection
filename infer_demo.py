@@ -43,6 +43,20 @@ def parse_args() -> argparse.Namespace:
         choices=["patchcore", "efficientad"],
         help="Model architecture used by the checkpoint.",
     )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=Path("./can"),
+        help="Path to MVTec AD 2 root. Used only to add GT masks/overlays to reports.",
+    )
+    parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category for GT masks.")
+    parser.add_argument(
+        "--test-type",
+        type=str,
+        default="public",
+        choices=["public", "private", "private_mixed"],
+        help="MVTec AD 2 test split used for GT masks.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("./demo_outputs"), help="Inference output directory.")
     parser.add_argument("--image-size", type=int, default=256, help="PredictDataset image size.")
     parser.add_argument("--accelerator", type=str, default="gpu", help="Lightning accelerator.")
@@ -233,6 +247,27 @@ def overlay_heatmap(image_rgb: np.ndarray, heatmap_rgb: np.ndarray, alpha: float
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
+def overlay_mask(image_rgb: np.ndarray, mask_gray: np.ndarray, alpha: float = 0.65) -> np.ndarray:
+    """Overlay a green GT mask on the image, dilated slightly for visibility."""
+    if mask_gray.shape[:2] != image_rgb.shape[:2]:
+        mask_gray = cv2.resize(mask_gray, (image_rgb.shape[1], image_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    mask = mask_gray > 0
+    if not np.any(mask):
+        return image_rgb.copy()
+
+    kernel_size = max(5, int(round(min(image_rgb.shape[:2]) * 0.008)))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    display_mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=1) > 0
+
+    overlay = image_rgb.copy().astype(np.float32)
+    gt_color = np.array([0, 255, 80], dtype=np.float32)
+    overlay[display_mask] = overlay[display_mask] * (1.0 - alpha) + gt_color * alpha
+    return np.clip(overlay, 0, 255).astype(np.uint8)
+
+
 def infer_ground_truth_from_path(path: Path) -> str | None:
     text = str(path).replace("\\", "/").lower()
     if "/good/" in text:
@@ -242,6 +277,59 @@ def infer_ground_truth_from_path(path: Path) -> str | None:
     if "test_public" in text:
         return "bad"
     return None
+
+
+def source_image_name_from_demo_name(path: Path) -> str:
+    parts = path.name.split("_")
+    if len(parts) >= 3 and parts[0].isdigit() and parts[1].lower() in {"good", "bad"}:
+        return "_".join(parts[2:])
+    return path.name
+
+
+def category_roots(dataset_root: Path, category: str) -> list[Path]:
+    roots = [dataset_root / category, dataset_root]
+    return [root for idx, root in enumerate(roots) if root not in roots[:idx]]
+
+
+def find_gt_mask_path(dataset_root: Path, category: str, test_type: str, image_path: Path, gt_label: str | None) -> Path | None:
+    if gt_label != "bad":
+        return None
+
+    source_name = source_image_name_from_demo_name(image_path)
+    source_stem = Path(source_name).stem
+    split_name = f"test_{test_type}"
+    mask_name = f"{source_stem}_mask.png"
+
+    for category_root in category_roots(dataset_root, category):
+        candidates = [
+            category_root / split_name / "ground_truth" / "bad" / mask_name,
+            category_root / split_name / "ground_truth" / mask_name,
+            category_root / "ground_truth" / "bad" / mask_name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def load_gt_mask(
+    dataset_root: Path,
+    category: str,
+    test_type: str,
+    image_path: Path,
+    image_hw: tuple[int, int],
+    gt_label: str | None,
+) -> tuple[np.ndarray, Path | None]:
+    target_h, target_w = image_hw
+    mask_path = find_gt_mask_path(dataset_root, category, test_type, image_path, gt_label)
+    if mask_path is None:
+        return np.zeros((target_h, target_w), dtype=np.uint8), None
+
+    mask = np.array(Image.open(mask_path).convert("L"))
+    if mask.shape[:2] != (target_h, target_w):
+        mask = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    mask = np.where(mask > 0, 255, 0).astype(np.uint8)
+    return mask, mask_path
 
 
 def save_image(path: Path, image_rgb: np.ndarray) -> None:
@@ -263,8 +351,10 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
               </div>
               <div class=\"grid\">
                 <div><p>Original</p><img src=\"{html.escape(row['original_rel'])}\"></div>
+                <div><p>GT Mask</p><img src=\"{html.escape(row['gt_mask_rel'])}\"></div>
+                <div><p>GT Overlay</p><img src=\"{html.escape(row['gt_overlay_rel'])}\"></div>
                 <div><p>Heatmap</p><img src=\"{html.escape(row['heatmap_rel'])}\"></div>
-                <div><p>Overlay</p><img src=\"{html.escape(row['overlay_rel'])}\"></div>
+                <div><p>Pred Overlay</p><img src=\"{html.escape(row['overlay_rel'])}\"></div>
               </div>
             </div>
             """.strip()
@@ -283,7 +373,7 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
     .summary {{ margin-bottom: 24px; }}
     .card {{ background: white; border-radius: 12px; padding: 16px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
     .meta {{ margin-bottom: 12px; line-height: 1.6; }}
-    .grid {{ display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: 12px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(5, minmax(180px, 1fr)); gap: 12px; }}
     img {{ width: 100%; border-radius: 8px; border: 1px solid #ddd; }}
     p {{ margin: 0 0 8px 0; font-weight: 600; }}
     @media (max-width: 960px) {{ .grid {{ grid-template-columns: 1fr; }} }}
@@ -323,7 +413,9 @@ def main() -> None:
     heatmap_dir = args.output_dir / "heatmaps"
     overlay_dir = args.output_dir / "overlays"
     rawmap_dir = args.output_dir / "raw_maps"
-    for d in (original_dir, heatmap_dir, overlay_dir, rawmap_dir):
+    gt_mask_dir = args.output_dir / "gt_masks"
+    gt_overlay_dir = args.output_dir / "gt_overlays"
+    for d in (original_dir, heatmap_dir, overlay_dir, rawmap_dir, gt_mask_dir, gt_overlay_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     dataset = predict_dataset_cls(path=args.input_path, image_size=(args.image_size, args.image_size))
@@ -362,17 +454,31 @@ def main() -> None:
         gray_map = normalize_map(anomaly_map)
         heatmap_rgb = make_heatmap(gray_map, target_hw=image_rgb.shape[:2])
         overlay_rgb = overlay_heatmap(image_rgb, heatmap_rgb, alpha=0.45)
+        gt_label = infer_ground_truth_from_path(image_path)
+        gt_mask, gt_mask_source = load_gt_mask(
+            dataset_root=args.dataset_root,
+            category=args.category,
+            test_type=args.test_type,
+            image_path=image_path,
+            image_hw=image_rgb.shape[:2],
+            gt_label=gt_label,
+        )
+        gt_overlay_rgb = overlay_mask(image_rgb, gt_mask)
 
         stem = f"{idx:04d}_{image_path.stem}"
         original_path = original_dir / f"{stem}.png"
         heatmap_path = heatmap_dir / f"{stem}.png"
         overlay_path = overlay_dir / f"{stem}.png"
         rawmap_path = rawmap_dir / f"{stem}.png"
+        gt_mask_path = gt_mask_dir / f"{stem}.png"
+        gt_overlay_path = gt_overlay_dir / f"{stem}.png"
 
         save_image(original_path, image_rgb)
         save_image(heatmap_path, heatmap_rgb)
         save_image(overlay_path, overlay_rgb)
+        save_image(gt_overlay_path, gt_overlay_rgb)
         Image.fromarray(gray_map).save(rawmap_path)
+        Image.fromarray(gt_mask).save(gt_mask_path)
 
         row = {
             "index": idx,
@@ -380,8 +486,11 @@ def main() -> None:
             "image_name": image_path.name,
             "pred_label": pred_label,
             "pred_score": pred_score,
-            "gt_label": infer_ground_truth_from_path(image_path),
+            "gt_label": gt_label,
+            "gt_mask_source": str(gt_mask_source) if gt_mask_source else "",
             "original_rel": original_path.relative_to(args.output_dir).as_posix(),
+            "gt_mask_rel": gt_mask_path.relative_to(args.output_dir).as_posix(),
+            "gt_overlay_rel": gt_overlay_path.relative_to(args.output_dir).as_posix(),
             "heatmap_rel": heatmap_path.relative_to(args.output_dir).as_posix(),
             "overlay_rel": overlay_path.relative_to(args.output_dir).as_posix(),
             "raw_map_rel": rawmap_path.relative_to(args.output_dir).as_posix(),
@@ -400,6 +509,9 @@ def main() -> None:
     metadata = {
         "checkpoint": str(ckpt_path),
         "input_path": str(args.input_path),
+        "dataset_root": str(args.dataset_root),
+        "category": args.category,
+        "test_type": args.test_type,
         "model": args.model,
         "image_size": args.image_size,
         "num_predictions": len(rows),
