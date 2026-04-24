@@ -104,6 +104,22 @@ python train_demo.py \
 
 > Ghi chú: EfficientAD thường chạy với `train_batch_size=1`.
 
+### Chẩn đoán theo biến thể ảnh
+
+Trong bộ `can` này, `train/good` và `validation/good` chỉ có ảnh `regular`, nhưng `test_public/good` có thêm `overexposed`, `underexposed`, `shift_1`, `shift_2`, `shift_3`. Với one-class anomaly detection, các biến thể này có thể bị xem là anomaly dù nhãn là good.
+
+Để kiểm tra cùng điều kiện chụp trước:
+
+```powershell
+.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_regular --epochs 1 --image-size 384 --test-variant regular
+```
+
+Để đo toàn bộ public split:
+
+```powershell
+.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_all --epochs 1 --image-size 384 --test-variant all
+```
+
 ## 5) Chuẩn bị ảnh input demo
 
 Bạn có thể lấy sẵn một ít ảnh từ `test_public` để demo:
@@ -115,6 +131,12 @@ python prepare_demo_inputs.py \
   --output-dir ./demo_inputs \
   --num-good 8 \
   --num-bad 8
+```
+
+Nếu muốn demo cùng điều kiện chụp với train, thêm:
+
+```powershell
+--variants regular
 ```
 
 ## 6) Chạy inference và xuất report
@@ -138,6 +160,8 @@ python infer_demo.py \
   --model patchcore \
   --output-dir ./demo_outputs
 ```
+
+Heatmap mặc định được chuẩn hóa `global` trên cả batch inference để tránh ảnh good bị tô đỏ chỉ vì từng ảnh được stretch riêng. Nếu muốn hành vi cũ, dùng `--heatmap-normalization per-image`.
 
 Kết quả sẽ có:
 - `predictions.csv`

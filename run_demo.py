@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
+VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
 REQUIRED_IMPORTS = {
     "anomalib": "Anomalib",
     "cv2": "OpenCV",
@@ -47,6 +49,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-batch-size", type=int, default=8, help="Eval/test batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
     parser.add_argument("--image-size", type=int, default=256, help="Training and inference image size.")
+    parser.add_argument(
+        "--test-variant",
+        nargs="+",
+        default=["all"],
+        choices=VARIANT_CHOICES,
+        help="Variant filter for the training-time evaluation split.",
+    )
+    parser.add_argument(
+        "--demo-variants",
+        nargs="+",
+        default=None,
+        choices=VARIANT_CHOICES,
+        help="Variant filter for sampled demo inputs. Defaults to --test-variant.",
+    )
+    parser.add_argument(
+        "--heatmap-normalization",
+        choices=["global", "per-image"],
+        default="global",
+        help="Normalize heatmaps across the inference batch or independently per image.",
+    )
     parser.add_argument("--accelerator", type=str, default="gpu", help="Lightning accelerator.")
     parser.add_argument("--devices", type=str, default="1", help="Lightning devices value.")
     parser.add_argument("--check-only", action="store_true", help="Only validate environment and dataset, then exit.")
@@ -174,6 +196,7 @@ def main() -> None:
     epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
     default_batch_size = 1 if args.model == "efficientad" else 8
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
+    demo_variants = args.demo_variants if args.demo_variants is not None else args.test_variant
 
     args.dataset_root = dataset_root
     if not args.skip_checks:
@@ -205,6 +228,8 @@ def main() -> None:
             str(args.image_size),
             "--num-workers",
             str(args.num_workers),
+            "--test-variant",
+            *args.test_variant,
             "--accelerator",
             args.accelerator,
             "--devices",
@@ -227,6 +252,8 @@ def main() -> None:
             str(args.num_good),
             "--num-bad",
             str(args.num_bad),
+            "--variants",
+            *demo_variants,
             "--clean",
         ],
         project_root,
@@ -250,6 +277,8 @@ def main() -> None:
             str(output_dir),
             "--image-size",
             str(args.image_size),
+            "--heatmap-normalization",
+            args.heatmap_normalization,
             "--accelerator",
             args.accelerator,
             "--devices",

@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("./demo_outputs"), help="Inference output directory.")
     parser.add_argument("--image-size", type=int, default=256, help="PredictDataset image size.")
+    parser.add_argument(
+        "--heatmap-normalization",
+        choices=["global", "per-image"],
+        default="global",
+        help="Normalize heatmaps across the inference batch or independently per image.",
+    )
     parser.add_argument("--accelerator", type=str, default="gpu", help="Lightning accelerator.")
     parser.add_argument("--devices", type=str, default="1", help="Lightning devices.")
     return parser.parse_args()
@@ -99,16 +105,20 @@ def find_checkpoint(results_dir: Path) -> Path | None:
     return preferred[0] if preferred else ckpts[0]
 
 
-def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any) -> Any:
+def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: int) -> Any:
+    pre_processor_size = (image_size, image_size)
     if model_name == "patchcore":
         return patchcore_cls(
             backbone="wide_resnet50_2",
             layers=("layer2", "layer3"),
             coreset_sampling_ratio=0.1,
             num_neighbors=9,
+            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     if model_name == "efficientad":
-        return efficientad_cls()
+        return efficientad_cls(
+            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
     raise ValueError(f"Unsupported model: {model_name}")
 
 
@@ -234,10 +244,10 @@ def tensor_to_numpy(x: Any) -> np.ndarray:
     return arr
 
 
-def normalize_map(anomaly_map: np.ndarray) -> np.ndarray:
+def normalize_map(anomaly_map: np.ndarray, min_v: float | None = None, max_v: float | None = None) -> np.ndarray:
     anomaly_map = anomaly_map.astype(np.float32)
-    min_v = float(anomaly_map.min())
-    max_v = float(anomaly_map.max())
+    min_v = float(anomaly_map.min()) if min_v is None else min_v
+    max_v = float(anomaly_map.max()) if max_v is None else max_v
     if max_v - min_v < 1e-8:
         return np.zeros_like(anomaly_map, dtype=np.uint8)
     norm = (anomaly_map - min_v) / (max_v - min_v)
@@ -358,7 +368,7 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
             <div class=\"card\">
               <div class=\"meta\">
                 <div><b>File:</b> {html.escape(row['image_name'])}</div>
-                <div><b>Pred:</b> {html.escape(str(row['pred_label']))}</div>
+                <div><b>Pred:</b> {html.escape(str(row.get('pred_label_name', row['pred_label'])))}</div>
                 <div><b>Score:</b> {row['pred_score']:.6f}</div>
                 <div><b>GT guess:</b> {html.escape(str(row.get('gt_label', 'unknown')))}</div>
               </div>
@@ -433,7 +443,7 @@ def main() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
     dataset = predict_dataset_cls(path=args.input_path, image_size=(args.image_size, args.image_size))
-    model = build_model(args.model, patchcore_cls, efficient_ad_cls)
+    model = build_model(args.model, patchcore_cls, efficient_ad_cls, args.image_size)
     engine = engine_cls(accelerator=args.accelerator, devices=args.devices)
 
     predictions = engine.predict(
@@ -446,7 +456,9 @@ def main() -> None:
     if not flat_predictions:
         raise SystemExit("No predictions were returned by Engine.predict().")
 
-    rows: list[dict[str, Any]] = []
+    prepared_predictions: list[dict[str, Any]] = []
+    map_mins: list[float] = []
+    map_maxs: list[float] = []
 
     for idx, pred in enumerate(flat_predictions):
         image_path = Path(getattr(pred, "image_path", f"sample_{idx:04d}.png"))
@@ -455,7 +467,7 @@ def main() -> None:
         anomaly_map_like = getattr(pred, "anomaly_map", None)
         if anomaly_map_like is None:
             raise SystemExit("Prediction object does not contain anomaly_map.")
-        anomaly_map = tensor_to_numpy(anomaly_map_like)
+        anomaly_map = tensor_to_numpy(anomaly_map_like).astype(np.float32)
 
         image_like = getattr(pred, "image", None)
         if image_path.exists():
@@ -465,7 +477,39 @@ def main() -> None:
         else:
             raise SystemExit(f"Could not load source image for prediction {idx}: {image_path}")
 
-        gray_map = normalize_map(anomaly_map)
+        map_min = float(anomaly_map.min())
+        map_max = float(anomaly_map.max())
+        map_mins.append(map_min)
+        map_maxs.append(map_max)
+        prepared_predictions.append(
+            {
+                "index": idx,
+                "image_path": image_path,
+                "pred_label": pred_label,
+                "pred_score": pred_score,
+                "anomaly_map": anomaly_map,
+                "anomaly_map_min": map_min,
+                "anomaly_map_max": map_max,
+                "image_rgb": image_rgb,
+            }
+        )
+
+    global_map_min = min(map_mins) if map_mins else None
+    global_map_max = max(map_maxs) if map_maxs else None
+    rows: list[dict[str, Any]] = []
+
+    for item in prepared_predictions:
+        idx = int(item["index"])
+        image_path = item["image_path"]
+        image_rgb = item["image_rgb"]
+        pred_label = int(item["pred_label"])
+        pred_score = float(item["pred_score"])
+        anomaly_map = item["anomaly_map"]
+
+        if args.heatmap_normalization == "global":
+            gray_map = normalize_map(anomaly_map, global_map_min, global_map_max)
+        else:
+            gray_map = normalize_map(anomaly_map)
         heatmap_rgb = make_heatmap(gray_map, target_hw=image_rgb.shape[:2])
         overlay_rgb = overlay_heatmap(image_rgb, heatmap_rgb, alpha=0.45)
         gt_label = infer_ground_truth_from_path(image_path)
@@ -494,13 +538,19 @@ def main() -> None:
         Image.fromarray(gray_map).save(rawmap_path)
         Image.fromarray(gt_mask).save(gt_mask_path)
 
+        pred_label_name = "bad" if pred_label == 1 else "good"
+        correct = pred_label_name == gt_label if gt_label in {"good", "bad"} else ""
         row = {
             "index": idx,
             "image_path": str(image_path),
             "image_name": image_path.name,
             "pred_label": pred_label,
+            "pred_label_name": pred_label_name,
             "pred_score": pred_score,
             "gt_label": gt_label,
+            "correct": correct,
+            "anomaly_map_min": item["anomaly_map_min"],
+            "anomaly_map_max": item["anomaly_map_max"],
             "gt_mask_source": str(gt_mask_source) if gt_mask_source else "",
             "original_rel": original_path.relative_to(args.output_dir).as_posix(),
             "gt_mask_rel": gt_mask_path.relative_to(args.output_dir).as_posix(),
@@ -528,6 +578,9 @@ def main() -> None:
         "test_type": args.test_type,
         "model": args.model,
         "image_size": args.image_size,
+        "heatmap_normalization": args.heatmap_normalization,
+        "global_anomaly_map_min": global_map_min,
+        "global_anomaly_map_max": global_map_max,
         "num_predictions": len(rows),
         "csv": str(csv_path),
         "report_html": str(html_path),

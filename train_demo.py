@@ -15,7 +15,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 try:
     from anomalib.data import MVTecAD2 as _MVTecAD2Base
@@ -23,7 +23,16 @@ except Exception:  # pragma: no cover - import_dependencies handles the runtime 
     _MVTecAD2Base = object
 
 
+VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
+VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
+
+
 class SafeMVTecAD2(_MVTecAD2Base):
+    def __init__(self, *args: Any, test_variants: Iterable[str] | None = None, **kwargs: Any) -> None:
+        self.test_variants = normalize_variant_selection(test_variants)
+        super().__init__(*args, **kwargs)
+
     def _setup(self, *args: Any, **kwargs: Any) -> None:
         super()._setup(*args, **kwargs)
         for dataset_name in (
@@ -35,6 +44,13 @@ class SafeMVTecAD2(_MVTecAD2Base):
             "test_private_mixed_data",
         ):
             normalize_mask_paths(getattr(self, dataset_name, None))
+        for dataset_name in (
+            "test_data",
+            "test_public_data",
+            "test_private_data",
+            "test_private_mixed_data",
+        ):
+            filter_dataset_variants(getattr(self, dataset_name, None), self.test_variants)
 
 
 if __name__ == "__main__":
@@ -65,6 +81,13 @@ def parse_args() -> argparse.Namespace:
         default="public",
         choices=["public", "private", "private_mixed"],
         help="Which MVTec AD 2 test split to use.",
+    )
+    parser.add_argument(
+        "--test-variant",
+        nargs="+",
+        default=["all"],
+        choices=VARIANT_CHOICES,
+        help="Filter evaluation images by capture variant. Use all for the full public split.",
     )
     parser.add_argument(
         "--accelerator",
@@ -115,6 +138,42 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
     raise ValueError(f"Unsupported model: {model_name}")
 
 
+def normalize_variant_selection(variants: Iterable[str] | None) -> set[str] | None:
+    if variants is None:
+        return None
+    selected = {str(variant).lower() for variant in variants}
+    if not selected or "all" in selected:
+        return None
+    unknown = selected.difference(IMAGE_VARIANTS)
+    if unknown:
+        raise ValueError(f"Unknown image variant(s): {', '.join(sorted(unknown))}")
+    return selected
+
+
+def format_variant_selection(variants: Iterable[str] | None) -> str:
+    selected = normalize_variant_selection(variants)
+    if selected is None:
+        return "all"
+    return ",".join(sorted(selected))
+
+
+def image_variant(path: Any) -> str:
+    stem = Path(str(path)).stem
+    return stem.split("_", 1)[1] if "_" in stem else stem
+
+
+def filter_dataset_variants(dataset: Any, variants: set[str] | None) -> None:
+    if variants is None:
+        return
+
+    samples = getattr(dataset, "samples", None)
+    if samples is None or "image_path" not in samples.columns:
+        return
+
+    filtered = samples[samples["image_path"].map(image_variant).isin(variants)].copy()
+    dataset.samples = filtered.reset_index(drop=True)
+
+
 def normalize_mask_paths(dataset: Any) -> None:
     """Convert pandas NaN mask paths from MVTecAD2 into real None values."""
     samples = getattr(dataset, "samples", None)
@@ -126,6 +185,52 @@ def normalize_mask_paths(dataset: Any) -> None:
     samples = samples.copy()
     samples["mask_path"] = samples["mask_path"].astype("object").where(pd.notna(samples["mask_path"]), None)
     dataset.samples = samples
+
+
+def resolve_category_root(dataset_root: Path, category: str) -> Path:
+    category_root = dataset_root / category
+    return category_root if category_root.exists() else dataset_root
+
+
+def list_image_files(folder: Path) -> list[Path]:
+    if not folder.exists():
+        return []
+    return sorted(
+        p
+        for p in folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS and not p.stem.lower().endswith("_mask")
+    )
+
+
+def count_variants(folder: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in list_image_files(folder):
+        variant = image_variant(path)
+        counts[variant] = counts.get(variant, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def build_dataset_variant_summary(dataset_root: Path, category: str) -> dict[str, dict[str, int]]:
+    category_root = resolve_category_root(dataset_root, category)
+    return {
+        "train_good": count_variants(category_root / "train" / "good"),
+        "validation_good": count_variants(category_root / "validation" / "good"),
+        "test_public_good": count_variants(category_root / "test_public" / "good"),
+        "test_public_bad": count_variants(category_root / "test_public" / "bad"),
+    }
+
+
+def print_domain_shift_warning(summary: dict[str, dict[str, int]], selected_variants: set[str] | None) -> None:
+    train_variants = set(summary.get("train_good", {}))
+    test_good_variants = set(summary.get("test_public_good", {}))
+    evaluated_variants = test_good_variants if selected_variants is None else selected_variants
+    unseen_variants = sorted(evaluated_variants.difference(train_variants))
+    if unseen_variants:
+        print(
+            "[WARN] Evaluation includes normal-image variants not present in train/good: "
+            + ", ".join(unseen_variants)
+        )
+        print("[WARN] One-class models may flag these capture shifts as anomalies. Use --test-variant regular for a same-condition check.")
 
 
 def make_safe_mvtec_ad2_cls(mvtec_ad2_cls: Any) -> Any:
@@ -167,6 +272,8 @@ def main() -> None:
     seed_everything(args.seed, workers=True)
     if args.image_size <= 0:
         raise SystemExit("--image-size must be a positive integer.")
+    selected_test_variants = normalize_variant_selection(args.test_variant)
+    dataset_variant_summary = build_dataset_variant_summary(args.dataset_root, args.category)
 
     train_batch_size = args.train_batch_size
     if train_batch_size is None:
@@ -179,6 +286,7 @@ def main() -> None:
         eval_batch_size=args.eval_batch_size,
         num_workers=args.num_workers,
         test_type=args.test_type,
+        test_variants=args.test_variant,
         seed=args.seed,
     )
 
@@ -203,7 +311,10 @@ def main() -> None:
     print(f"[INFO] model       : {args.model}")
     print(f"[INFO] image_size  : {args.image_size}")
     print(f"[INFO] test_type   : {args.test_type}")
+    print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
     print(f"[INFO] results_dir : {args.results_dir}")
+    print(f"[INFO] variants    : {dataset_variant_summary}")
+    print_domain_shift_warning(dataset_variant_summary, selected_test_variants)
     print("=" * 80)
 
     engine.fit(model=model, datamodule=datamodule)
@@ -237,6 +348,8 @@ def main() -> None:
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,
         "test_type": args.test_type,
+        "test_variant": format_variant_selection(args.test_variant),
+        "dataset_variant_summary": dataset_variant_summary,
         "accelerator": args.accelerator,
         "devices": args.devices,
         "seed": args.seed,
