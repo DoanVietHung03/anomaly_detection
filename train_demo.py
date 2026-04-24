@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,11 @@ class SafeMVTecAD2(_MVTecAD2Base):
             "test_private_mixed_data",
         ):
             normalize_mask_paths(getattr(self, dataset_name, None))
+
+
+if __name__ == "__main__":
+    sys.modules.setdefault("train_demo", sys.modules[__name__])
+SafeMVTecAD2.__module__ = "train_demo"
 
 
 def parse_args() -> argparse.Namespace:

@@ -7,6 +7,7 @@ import argparse
 import csv
 import html
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
@@ -76,6 +77,18 @@ def import_dependencies() -> tuple[Any, Any, Any, Any]:
             f"Original error: {exc}"
         ) from exc
     return PredictDataset, Engine, Patchcore, EfficientAd
+
+
+def install_checkpoint_compatibility_aliases() -> None:
+    """Allow old checkpoints to unpickle SafeMVTecAD2 saved from train_demo.py."""
+    try:
+        from train_demo import SafeMVTecAD2
+    except Exception:
+        return
+
+    main_module = sys.modules.get("__main__")
+    if main_module is not None and not hasattr(main_module, "SafeMVTecAD2"):
+        setattr(main_module, "SafeMVTecAD2", SafeMVTecAD2)
 
 
 def find_checkpoint(results_dir: Path) -> Path | None:
@@ -394,6 +407,7 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
 def main() -> None:
     args = parse_args()
     predict_dataset_cls, engine_cls, patchcore_cls, efficient_ad_cls = import_dependencies()
+    install_checkpoint_compatibility_aliases()
 
     ckpt_path = args.checkpoint
     if ckpt_path is None:
