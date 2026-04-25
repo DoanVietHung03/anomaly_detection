@@ -14,6 +14,7 @@ from pathlib import Path
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
+DEFAULT_IMAGE_SIZE = (512, 1024)
 REQUIRED_IMPORTS = {
     "anomalib": "Anomalib",
     "cv2": "OpenCV",
@@ -41,14 +42,43 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--results-dir", type=Path, default=None, help="Training output directory.")
     parser.add_argument("--input-dir", type=Path, default=Path("./demo_inputs"), help="Prepared demo input directory.")
+    parser.add_argument(
+        "--calibration-dir",
+        type=Path,
+        default=Path("./calibration_inputs"),
+        help="Prepared calibration input directory used for threshold selection.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None, help="Inference output directory.")
     parser.add_argument("--epochs", type=int, default=None, help="Training epochs. Defaults by model.")
     parser.add_argument("--num-good", type=int, default=8, help="Number of good demo images to sample.")
     parser.add_argument("--num-bad", type=int, default=8, help="Number of anomalous demo images to sample.")
+    parser.add_argument("--num-calibration-good", type=int, default=4, help="Number of good calibration images to sample.")
+    parser.add_argument("--num-calibration-bad", type=int, default=4, help="Number of bad calibration images to sample.")
     parser.add_argument("--train-batch-size", type=int, default=None, help="Training batch size.")
     parser.add_argument("--eval-batch-size", type=int, default=8, help="Eval/test batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
-    parser.add_argument("--image-size", type=int, default=256, help="Training and inference image size.")
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Square training/inference image size. Overridden by --image-height/--image-width.",
+    )
+    parser.add_argument("--image-height", type=int, default=None, help="Training/inference image height. Defaults to 512.")
+    parser.add_argument("--image-width", type=int, default=None, help="Training/inference image width. Defaults to 1024.")
+    parser.add_argument(
+        "--tiling",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Enable tiled PatchCore processing. auto enables it for PatchCore only.",
+    )
+    parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
+    parser.add_argument("--tile-stride", type=int, default=None, help="PatchCore tile stride. Defaults to half tile size.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
+    parser.add_argument(
+        "--skip-calibration",
+        action="store_true",
+        help="Skip calibration input preparation and use model/default labels.",
+    )
     parser.add_argument(
         "--test-variant",
         nargs="+",
@@ -66,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--heatmap-normalization",
         choices=["global", "per-image"],
-        default="global",
+        default="per-image",
         help="Normalize heatmaps across the inference batch or independently per image.",
     )
     parser.add_argument("--accelerator", type=str, default="gpu", help="Lightning accelerator.")
@@ -78,6 +108,21 @@ def parse_args() -> argparse.Namespace:
 
 def default_epochs(model: str) -> int:
     return 30 if model == "efficientad" else 1
+
+
+def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
+    if args.image_height is not None or args.image_width is not None:
+        if args.image_height is None or args.image_width is None:
+            raise SystemExit("Pass both --image-height and --image-width, or neither.")
+        image_size = (args.image_height, args.image_width)
+    elif args.image_size is not None:
+        image_size = (args.image_size, args.image_size)
+    else:
+        image_size = DEFAULT_IMAGE_SIZE
+
+    if image_size[0] <= 0 or image_size[1] <= 0:
+        raise SystemExit("Image height and width must be positive integers.")
+    return image_size
 
 
 def format_command(command: list[str]) -> str:
@@ -192,7 +237,9 @@ def main() -> None:
     dataset_root = project_path(args.dataset_root, project_root)
     results_dir = project_path(args.results_dir or Path(f"./runs_{args.model}"), project_root)
     input_dir = project_path(args.input_dir, project_root)
+    calibration_dir = project_path(args.calibration_dir, project_root)
     output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}"), project_root)
+    image_size = resolve_image_size(args)
     epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
     default_batch_size = 1 if args.model == "efficientad" else 8
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
@@ -206,40 +253,50 @@ def main() -> None:
 
     python = sys.executable
 
-    run(
-        [
-            python,
-            "train_demo.py",
-            "--dataset-root",
-            str(dataset_root),
-            "--category",
-            args.category,
-            "--model",
-            args.model,
-            "--results-dir",
-            str(results_dir),
-            "--epochs",
-            str(epochs),
-            "--train-batch-size",
-            str(train_batch_size),
-            "--eval-batch-size",
-            str(args.eval_batch_size),
-            "--image-size",
-            str(args.image_size),
-            "--num-workers",
-            str(args.num_workers),
-            "--test-variant",
-            *args.test_variant,
-            "--accelerator",
-            args.accelerator,
-            "--devices",
-            args.devices,
-        ],
-        project_root,
-    )
+    train_command = [
+        python,
+        "train_demo.py",
+        "--dataset-root",
+        str(dataset_root),
+        "--category",
+        args.category,
+        "--model",
+        args.model,
+        "--results-dir",
+        str(results_dir),
+        "--epochs",
+        str(epochs),
+        "--train-batch-size",
+        str(train_batch_size),
+        "--eval-batch-size",
+        str(args.eval_batch_size),
+        "--image-height",
+        str(image_size[0]),
+        "--image-width",
+        str(image_size[1]),
+        "--num-workers",
+        str(args.num_workers),
+        "--tiling",
+        args.tiling,
+        "--tile-size",
+        str(args.tile_size),
+        "--test-variant",
+        *args.test_variant,
+        "--accelerator",
+        args.accelerator,
+        "--devices",
+        args.devices,
+        "--seed",
+        str(args.seed),
+    ]
+    if args.tile_stride is not None:
+        train_command.extend(["--tile-stride", str(args.tile_stride)])
+    run(train_command, project_root)
 
-    run(
-        [
+    calibration_manifest = calibration_dir / "manifest.json"
+    use_calibration = not args.skip_calibration and (args.num_calibration_good > 0 or args.num_calibration_bad > 0)
+    if use_calibration:
+        calibration_command = [
             python,
             "prepare_demo_inputs.py",
             "--dataset-root",
@@ -247,45 +304,79 @@ def main() -> None:
             "--category",
             args.category,
             "--output-dir",
-            str(input_dir),
+            str(calibration_dir),
             "--num-good",
-            str(args.num_good),
+            str(args.num_calibration_good),
             "--num-bad",
-            str(args.num_bad),
+            str(args.num_calibration_bad),
+            "--seed",
+            str(args.seed),
             "--variants",
             *demo_variants,
+            "--manifest-path",
+            str(calibration_manifest),
             "--clean",
-        ],
-        project_root,
-    )
+        ]
+        run(calibration_command, project_root)
 
-    run(
-        [
-            python,
-            "infer_demo.py",
-            "--input-path",
-            str(input_dir),
-            "--results-dir",
-            str(results_dir),
-            "--model",
-            args.model,
-            "--dataset-root",
-            str(dataset_root),
-            "--category",
-            args.category,
-            "--output-dir",
-            str(output_dir),
-            "--image-size",
-            str(args.image_size),
-            "--heatmap-normalization",
-            args.heatmap_normalization,
-            "--accelerator",
-            args.accelerator,
-            "--devices",
-            args.devices,
-        ],
-        project_root,
-    )
+    prepare_command = [
+        python,
+        "prepare_demo_inputs.py",
+        "--dataset-root",
+        str(dataset_root),
+        "--category",
+        args.category,
+        "--output-dir",
+        str(input_dir),
+        "--num-good",
+        str(args.num_good),
+        "--num-bad",
+        str(args.num_bad),
+        "--seed",
+        str(args.seed + 1),
+        "--variants",
+        *demo_variants,
+        "--clean",
+    ]
+    if use_calibration and calibration_manifest.exists():
+        prepare_command.extend(["--exclude-manifest", str(calibration_manifest)])
+    run(prepare_command, project_root)
+
+    infer_command = [
+        python,
+        "infer_demo.py",
+        "--input-path",
+        str(input_dir),
+        "--results-dir",
+        str(results_dir),
+        "--model",
+        args.model,
+        "--dataset-root",
+        str(dataset_root),
+        "--category",
+        args.category,
+        "--output-dir",
+        str(output_dir),
+        "--image-height",
+        str(image_size[0]),
+        "--image-width",
+        str(image_size[1]),
+        "--tiling",
+        args.tiling,
+        "--tile-size",
+        str(args.tile_size),
+        "--heatmap-normalization",
+        args.heatmap_normalization,
+        "--accelerator",
+        args.accelerator,
+        "--devices",
+        args.devices,
+    ]
+    if args.tile_stride is not None:
+        infer_command.extend(["--tile-stride", str(args.tile_stride)])
+    if use_calibration and calibration_manifest.exists():
+        infer_command.extend(["--calibration-path", str(calibration_dir)])
+    run(infer_command, project_root)
 
     print(f"\nDone. Open: {output_dir / 'report.html'}")
 

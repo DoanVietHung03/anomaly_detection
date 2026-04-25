@@ -40,6 +40,9 @@ class PredictionRow:
     gt_label: str | None
     pred_label: int | None
     pred_score: float
+    raw_pred_score: float | None = None
+    calibrated_threshold: float | None = None
+    score_mode: str | None = None
     original_rel: str | None = None
     gt_mask_rel: str | None = None
     gt_overlay_rel: str | None = None
@@ -240,6 +243,9 @@ def read_predictions(path: Path) -> list[PredictionRow]:
                     gt_label=gt_label,
                     pred_label=safe_int(raw.get("pred_label")),
                     pred_score=score,
+                    raw_pred_score=safe_float(raw.get("raw_pred_score")),
+                    calibrated_threshold=safe_float(raw.get("calibrated_threshold")),
+                    score_mode=raw.get("score_mode") or None,
                     original_rel=raw.get("original_rel") or None,
                     gt_mask_rel=raw.get("gt_mask_rel") or None,
                     gt_overlay_rel=raw.get("gt_overlay_rel") or None,
@@ -790,7 +796,8 @@ def render_image_gallery(record: ModelArtifacts, output_dir: Path, max_items: in
             "<div class=\"sample-meta\">"
             f"<strong>{html.escape(row.image_name)}</strong>"
             f"<span>GT {html.escape(str(row.gt_label or 'unknown'))} | "
-            f"Pred {html.escape(prediction_label(row.pred_label))} | Score {row.pred_score:.4f}</span>"
+            f"Pred {html.escape(prediction_label(row.pred_label))} | Score {row.pred_score:.4f}"
+            f"{' | Threshold ' + format_number(row.calibrated_threshold) if row.calibrated_threshold is not None else ''}</span>"
             "</div>"
             f"<div class=\"sample-images\">{''.join(image_blocks)}</div>"
             "</article>",

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import shutil
 from pathlib import Path
+from typing import Any
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IGNORED_TEST_DIRS = {"ground_truth"}
@@ -31,6 +33,19 @@ def parse_args() -> argparse.Namespace:
         help="Capture variants to sample. Use all, or one/more of regular, overexposed, underexposed, shift_1, shift_2, shift_3.",
     )
     parser.add_argument("--clean", action="store_true", help="Remove existing generated good/bad folders first.")
+    parser.add_argument(
+        "--manifest-path",
+        type=Path,
+        default=None,
+        help="Optional JSON manifest path listing the sampled source files.",
+    )
+    parser.add_argument(
+        "--exclude-manifest",
+        action="append",
+        type=Path,
+        default=[],
+        help="Manifest JSON from a previous sampling run. Source files in it will be excluded.",
+    )
     return parser.parse_args()
 
 
@@ -78,14 +93,73 @@ def format_variant_selection(variants: set[str] | None) -> str:
     return ",".join(sorted(variants))
 
 
-def copy_paths(paths: list[Path], out_dir: Path, prefix: str) -> None:
+def copy_paths(paths: list[Path], out_dir: Path, prefix: str) -> list[dict[str, str]]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, str]] = []
     for idx, src in enumerate(paths):
         dst = out_dir / f"{idx:03d}_{prefix}_{src.name}"
         if dst.exists():
             dst.chmod(0o666)
         shutil.copy2(src, dst)
         dst.chmod(0o666)
+        records.append({"source": str(src.resolve()), "destination": str(dst.resolve()), "label": prefix})
+    return records
+
+
+def manifest_sources(path: Path) -> set[str]:
+    if not path.exists():
+        raise SystemExit(f"Exclude manifest not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Could not parse exclude manifest {path}: {exc}") from exc
+
+    sources: set[str] = set()
+    records: Any
+    if isinstance(data, dict):
+        records = data.get("samples", [])
+    else:
+        records = data
+    if not isinstance(records, list):
+        return sources
+    for record in records:
+        if isinstance(record, dict) and record.get("source"):
+            sources.add(str(Path(str(record["source"])).resolve()))
+    return sources
+
+
+def load_excluded_sources(paths: list[Path]) -> set[str]:
+    excluded: set[str] = set()
+    for path in paths:
+        excluded.update(manifest_sources(path))
+    return excluded
+
+
+def exclude_sources(paths: list[Path], excluded: set[str]) -> list[Path]:
+    if not excluded:
+        return paths
+    return [path for path in paths if str(path.resolve()) not in excluded]
+
+
+def write_manifest(
+    manifest_path: Path,
+    *,
+    args: argparse.Namespace,
+    selected_variants: set[str] | None,
+    records: list[dict[str, str]],
+) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "dataset_root": str(args.dataset_root.resolve()),
+        "category": args.category,
+        "output_dir": str(args.output_dir.resolve()),
+        "variants": format_variant_selection(selected_variants),
+        "seed": args.seed,
+        "num_good": args.num_good,
+        "num_bad": args.num_bad,
+        "samples": records,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def reset_generated_files(path: Path) -> None:
@@ -112,6 +186,7 @@ def main() -> None:
     args = parse_args()
     rng = random.Random(args.seed)
     selected_variants = normalize_variant_selection(args.variants)
+    excluded_sources = load_excluded_sources(args.exclude_manifest)
 
     category_root = args.dataset_root / args.category
     test_public = category_root / "test_public"
@@ -122,14 +197,14 @@ def main() -> None:
     if not good_dir.exists():
         raise SystemExit(f"Could not find good directory: {good_dir}")
 
-    good_images = filter_by_variants(list_images(good_dir), selected_variants)
+    good_images = exclude_sources(filter_by_variants(list_images(good_dir), selected_variants), excluded_sources)
 
     bad_images: list[Path] = []
     for child in sorted(test_public.iterdir()):
         child_name = child.name.lower()
         if child.is_dir() and child_name != "good" and child_name not in IGNORED_TEST_DIRS:
             bad_images.extend(list_images(child))
-    bad_images = filter_by_variants(bad_images, selected_variants)
+    bad_images = exclude_sources(filter_by_variants(bad_images, selected_variants), excluded_sources)
 
     if args.num_good > 0 and not good_images:
         raise SystemExit(f"No good images matched --variants {format_variant_selection(selected_variants)}.")
@@ -145,16 +220,21 @@ def main() -> None:
         reset_generated_files(good_out)
         reset_generated_files(bad_out)
 
-    copy_paths(sampled_good, good_out, "good")
-    copy_paths(sampled_bad, bad_out, "bad")
+    records = copy_paths(sampled_good, good_out, "good")
+    records.extend(copy_paths(sampled_bad, bad_out, "bad"))
+    if args.manifest_path is not None:
+        write_manifest(args.manifest_path, args=args, selected_variants=selected_variants, records=records)
 
     print("=" * 80)
     print("[INFO] Demo inputs prepared")
     print(f"[INFO] Source      : {test_public}")
     print(f"[INFO] Variants    : {format_variant_selection(selected_variants)}")
+    print(f"[INFO] Excluded    : {len(excluded_sources)} source file(s)")
     print(f"[INFO] Output dir  : {args.output_dir}")
     print(f"[INFO] Good copied : {len(sampled_good)}")
     print(f"[INFO] Bad copied  : {len(sampled_bad)}")
+    if args.manifest_path is not None:
+        print(f"[INFO] Manifest    : {args.manifest_path}")
     print("=" * 80)
 
 

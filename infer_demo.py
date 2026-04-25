@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+DEFAULT_IMAGE_SIZE = (512, 1024)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run inference demo and export heatmaps/report.")
@@ -59,7 +61,45 @@ def parse_args() -> argparse.Namespace:
         help="MVTec AD 2 test split used for GT masks.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("./demo_outputs"), help="Inference output directory.")
-    parser.add_argument("--image-size", type=int, default=256, help="PredictDataset image size.")
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Square PredictDataset image size. Overridden by --image-height/--image-width.",
+    )
+    parser.add_argument("--image-height", type=int, default=None, help="PredictDataset image height. Defaults to 512.")
+    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 1024.")
+    parser.add_argument(
+        "--calibration-path",
+        type=Path,
+        default=None,
+        help="Folder with labelled good/bad images used to choose a calibrated threshold.",
+    )
+    parser.add_argument(
+        "--calibration-threshold",
+        type=float,
+        default=None,
+        help="Manual threshold to apply to prediction scores. Overrides --calibration-path.",
+    )
+    parser.add_argument(
+        "--score-mode",
+        choices=["raw", "anomalib"],
+        default="raw",
+        help="Use raw model scores for calibration, or Anomalib post-processed scores.",
+    )
+    parser.add_argument(
+        "--tiling",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Enable tiled PatchCore inference. auto enables it for PatchCore only.",
+    )
+    parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
+    parser.add_argument(
+        "--tile-stride",
+        type=int,
+        default=None,
+        help="PatchCore tile stride. Defaults to half of --tile-size.",
+    )
     parser.add_argument(
         "--heatmap-normalization",
         choices=["global", "per-image"],
@@ -71,9 +111,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_dependencies() -> tuple[Any, Any, Any, Any]:
+def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any]:
     try:
+        from anomalib.callbacks import TilerConfigurationCallback
         from anomalib.data import PredictDataset
+        from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
         from anomalib.models import EfficientAd, Patchcore
     except Exception as exc:  # pragma: no cover - runtime safeguard
@@ -82,7 +124,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any]:
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return PredictDataset, Engine, Patchcore, EfficientAd
+    return PredictDataset, Engine, Patchcore, EfficientAd, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def install_checkpoint_compatibility_aliases() -> None:
@@ -105,8 +147,85 @@ def find_checkpoint(results_dir: Path) -> Path | None:
     return preferred[0] if preferred else ckpts[0]
 
 
-def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: int) -> Any:
-    pre_processor_size = (image_size, image_size)
+def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
+    if args.image_height is not None or args.image_width is not None:
+        if args.image_height is None or args.image_width is None:
+            raise SystemExit("Pass both --image-height and --image-width, or neither.")
+        image_size = (args.image_height, args.image_width)
+    elif args.image_size is not None:
+        image_size = (args.image_size, args.image_size)
+    else:
+        image_size = DEFAULT_IMAGE_SIZE
+
+    if image_size[0] <= 0 or image_size[1] <= 0:
+        raise SystemExit("Image height and width must be positive integers.")
+    return image_size
+
+
+def format_image_size(image_size: tuple[int, int]) -> str:
+    return f"{image_size[0]}x{image_size[1]}"
+
+
+def should_enable_tiling(model_name: str, tiling: str) -> bool:
+    if tiling == "off":
+        return False
+    if tiling == "on":
+        return True
+    return model_name == "patchcore"
+
+
+def resolve_tiling(
+    model_name: str,
+    tiling: str,
+    tile_size: int,
+    tile_stride: int | None,
+    image_size: tuple[int, int],
+) -> dict[str, Any]:
+    enabled = should_enable_tiling(model_name, tiling)
+    if not enabled:
+        return {"enabled": False, "tile_size": None, "tile_stride": None}
+    if model_name != "patchcore":
+        raise SystemExit("Tiling is only supported for PatchCore in this demo.")
+    if tile_size <= 0:
+        raise SystemExit("--tile-size must be a positive integer.")
+
+    max_tile = min(image_size)
+    effective_tile_size = min(tile_size, max_tile)
+    if effective_tile_size != tile_size:
+        print(
+            f"[WARN] Requested tile size {tile_size} exceeds image size {format_image_size(image_size)}; "
+            f"using {effective_tile_size}.",
+        )
+
+    stride = tile_stride if tile_stride is not None else max(1, effective_tile_size // 2)
+    if stride <= 0:
+        raise SystemExit("--tile-stride must be a positive integer.")
+    if stride > effective_tile_size:
+        print(f"[WARN] Requested tile stride {stride} exceeds tile size {effective_tile_size}; using {effective_tile_size}.")
+        stride = effective_tile_size
+
+    return {"enabled": True, "tile_size": effective_tile_size, "tile_stride": stride}
+
+
+def build_tiling_callbacks(
+    tiling_config: dict[str, Any],
+    tiler_callback_cls: Any,
+    upscale_mode_cls: Any,
+) -> list[Any]:
+    if not tiling_config["enabled"]:
+        return []
+    return [
+        tiler_callback_cls(
+            enable=True,
+            tile_size=int(tiling_config["tile_size"]),
+            stride=int(tiling_config["tile_stride"]),
+            mode=upscale_mode_cls.PADDING,
+        ),
+    ]
+
+
+def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+    pre_processor_size = image_size
     if model_name == "patchcore":
         return patchcore_cls(
             backbone="wide_resnet50_2",
@@ -138,22 +257,38 @@ def get_batch_size(prediction: Any) -> int:
     if isinstance(image_path, (list, tuple)):
         return len(image_path)
 
-    for field in ("pred_score", "pred_label", "anomaly_map", "image"):
+    for field in ("pred_score", "pred_label"):
         value = getattr(prediction, field, None)
         shape = getattr(value, "shape", None)
         if shape and len(shape) > 0:
             return int(shape[0])
+    anomaly_map = getattr(prediction, "anomaly_map", None)
+    shape = getattr(anomaly_map, "shape", None)
+    if shape and len(shape) >= 3:
+        return int(shape[0])
+    image = getattr(prediction, "image", None)
+    shape = getattr(image, "shape", None)
+    if shape and len(shape) == 4:
+        return int(shape[0])
     return 1
 
 
 def is_batch_prediction(prediction: Any) -> bool:
     if isinstance(getattr(prediction, "image_path", None), (list, tuple)):
         return True
-    for field in ("pred_score", "pred_label", "anomaly_map", "image"):
+    for field in ("pred_score", "pred_label"):
         value = getattr(prediction, field, None)
         shape = getattr(value, "shape", None)
         if shape and len(shape) > 0:
             return True
+    anomaly_map = getattr(prediction, "anomaly_map", None)
+    shape = getattr(anomaly_map, "shape", None)
+    if shape and len(shape) >= 3:
+        return True
+    image = getattr(prediction, "image", None)
+    shape = getattr(image, "shape", None)
+    if shape and len(shape) == 4:
+        return True
     return False
 
 
@@ -242,6 +377,36 @@ def tensor_to_numpy(x: Any) -> np.ndarray:
 
     arr = np.squeeze(arr)
     return arr
+
+
+def optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    arr = tensor_to_numpy(value)
+    if arr.size == 0:
+        return None
+    return int(np.asarray(arr).reshape(-1)[0])
+
+
+def scalar_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    arr = tensor_to_numpy(value)
+    if arr.size == 0:
+        return default
+    return float(np.asarray(arr).reshape(-1)[0])
+
+
+def configure_score_mode(model: Any, score_mode: str) -> None:
+    if score_mode != "raw":
+        return
+    post_processor = getattr(model, "post_processor", None)
+    if post_processor is None:
+        return
+    if hasattr(post_processor, "enable_normalization"):
+        post_processor.enable_normalization = False
+    if hasattr(post_processor, "enable_thresholding"):
+        post_processor.enable_thresholding = False
 
 
 def normalize_map(anomaly_map: np.ndarray, min_v: float | None = None, max_v: float | None = None) -> np.ndarray:
@@ -360,6 +525,117 @@ def save_image(path: Path, image_rgb: np.ndarray) -> None:
     Image.fromarray(image_rgb).save(path)
 
 
+def best_f1_threshold(labelled_scores: list[tuple[float, int]]) -> dict[str, float | int] | None:
+    if not labelled_scores:
+        return None
+    positives = sum(label for _, label in labelled_scores)
+    negatives = len(labelled_scores) - positives
+    if positives == 0 or negatives == 0:
+        return None
+
+    best: dict[str, float | int] | None = None
+    for threshold in sorted({score for score, _ in labelled_scores}, reverse=True):
+        tp = fp = tn = fn = 0
+        for score, label in labelled_scores:
+            pred = 1 if score >= threshold else 0
+            if label == 1 and pred == 1:
+                tp += 1
+            elif label == 0 and pred == 1:
+                fp += 1
+            elif label == 0 and pred == 0:
+                tn += 1
+            else:
+                fn += 1
+        precision = tp / (tp + fp) if tp + fp else 1.0
+        recall = tp / (tp + fn) if tp + fn else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        accuracy = (tp + tn) / (tp + fp + tn + fn)
+        candidate = {
+            "threshold": threshold,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "accuracy": accuracy,
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+        }
+        if best is None:
+            best = candidate
+            continue
+        best_key = (float(best["f1"]), float(best["accuracy"]), float(best["threshold"]))
+        candidate_key = (f1, accuracy, threshold)
+        if candidate_key > best_key:
+            best = candidate
+    return best
+
+
+def calibration_scores(predictions: list[dict[str, Any]]) -> list[tuple[float, int]]:
+    labelled: list[tuple[float, int]] = []
+    for item in predictions:
+        label = infer_ground_truth_from_path(item["image_path"])
+        if label == "bad":
+            labelled.append((float(item["pred_score"]), 1))
+        elif label == "good":
+            labelled.append((float(item["pred_score"]), 0))
+    return labelled
+
+
+def predict_path(
+    *,
+    path: Path,
+    predict_dataset_cls: Any,
+    engine: Any,
+    model: Any,
+    ckpt_path: Path,
+    image_size: tuple[int, int],
+) -> list[dict[str, Any]]:
+    dataset = predict_dataset_cls(path=path, image_size=image_size)
+    predictions = engine.predict(
+        model=model,
+        dataset=dataset,
+        ckpt_path=str(ckpt_path),
+        return_predictions=True,
+    )
+    flat_predictions = expand_predictions(predictions)
+    if not flat_predictions:
+        raise SystemExit(f"No predictions were returned for: {path}")
+
+    prepared: list[dict[str, Any]] = []
+    for idx, pred in enumerate(flat_predictions):
+        image_path = Path(getattr(pred, "image_path", f"sample_{idx:04d}.png"))
+        anomaly_map_like = getattr(pred, "anomaly_map", None)
+        if anomaly_map_like is None:
+            raise SystemExit("Prediction object does not contain anomaly_map.")
+
+        image_like = getattr(pred, "image", None)
+        if image_path.exists():
+            image_rgb = np.array(Image.open(image_path).convert("RGB"))
+        elif image_like is not None:
+            image_rgb = to_numpy_image(image_like)
+        else:
+            raise SystemExit(f"Could not load source image for prediction {idx}: {image_path}")
+
+        pred_score = scalar_float(getattr(pred, "pred_score", None))
+        pred_label = optional_int(getattr(pred, "pred_label", None))
+        anomaly_map = tensor_to_numpy(anomaly_map_like).astype(np.float32)
+        prepared.append(
+            {
+                "index": idx,
+                "image_path": image_path,
+                "pred_label": pred_label,
+                "pred_score": pred_score,
+                "raw_pred_score": pred_score,
+                "anomaly_map": anomaly_map,
+                "anomaly_map_min": float(anomaly_map.min()),
+                "anomaly_map_max": float(anomaly_map.max()),
+                "image_rgb": image_rgb,
+            },
+        )
+    return prepared
+
+
 def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
     cards = []
     for row in rows:
@@ -370,6 +646,7 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
                 <div><b>File:</b> {html.escape(row['image_name'])}</div>
                 <div><b>Pred:</b> {html.escape(str(row.get('pred_label_name', row['pred_label'])))}</div>
                 <div><b>Score:</b> {row['pred_score']:.6f}</div>
+                <div><b>Threshold:</b> {html.escape(str(row.get('calibrated_threshold') or 'model/default'))}</div>
                 <div><b>GT guess:</b> {html.escape(str(row.get('gt_label', 'unknown')))}</div>
               </div>
               <div class=\"grid\">
@@ -416,8 +693,17 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    predict_dataset_cls, engine_cls, patchcore_cls, efficient_ad_cls = import_dependencies()
+    (
+        predict_dataset_cls,
+        engine_cls,
+        patchcore_cls,
+        efficient_ad_cls,
+        tiler_callback_cls,
+        upscale_mode_cls,
+    ) = import_dependencies()
     install_checkpoint_compatibility_aliases()
+    image_size = resolve_image_size(args)
+    tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
 
     ckpt_path = args.checkpoint
     if ckpt_path is None:
@@ -431,6 +717,10 @@ def main() -> None:
         raise SystemExit(f"Checkpoint not found: {ckpt_path}")
     if not args.input_path.exists():
         raise SystemExit(f"Input path not found: {args.input_path}")
+    if args.calibration_path is not None and not args.calibration_path.exists():
+        raise SystemExit(f"Calibration path not found: {args.calibration_path}")
+    if args.calibration_threshold is not None and not np.isfinite(args.calibration_threshold):
+        raise SystemExit("--calibration-threshold must be finite.")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     original_dir = args.output_dir / "originals"
@@ -442,57 +732,41 @@ def main() -> None:
     for d in (original_dir, heatmap_dir, overlay_dir, rawmap_dir, gt_mask_dir, gt_overlay_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    dataset = predict_dataset_cls(path=args.input_path, image_size=(args.image_size, args.image_size))
-    model = build_model(args.model, patchcore_cls, efficient_ad_cls, args.image_size)
-    engine = engine_cls(accelerator=args.accelerator, devices=args.devices)
+    model = build_model(args.model, patchcore_cls, efficient_ad_cls, image_size)
+    configure_score_mode(model, args.score_mode)
+    callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
+    engine = engine_cls(callbacks=callbacks, accelerator=args.accelerator, devices=args.devices)
 
-    predictions = engine.predict(
-        model=model,
-        dataset=dataset,
-        ckpt_path=str(ckpt_path),
-        return_predictions=True,
-    )
-    flat_predictions = expand_predictions(predictions)
-    if not flat_predictions:
-        raise SystemExit("No predictions were returned by Engine.predict().")
-
-    prepared_predictions: list[dict[str, Any]] = []
-    map_mins: list[float] = []
-    map_maxs: list[float] = []
-
-    for idx, pred in enumerate(flat_predictions):
-        image_path = Path(getattr(pred, "image_path", f"sample_{idx:04d}.png"))
-        pred_label = int(np.asarray(tensor_to_numpy(getattr(pred, "pred_label", 0))).reshape(-1)[0])
-        pred_score = float(np.asarray(tensor_to_numpy(getattr(pred, "pred_score", 0.0))).reshape(-1)[0])
-        anomaly_map_like = getattr(pred, "anomaly_map", None)
-        if anomaly_map_like is None:
-            raise SystemExit("Prediction object does not contain anomaly_map.")
-        anomaly_map = tensor_to_numpy(anomaly_map_like).astype(np.float32)
-
-        image_like = getattr(pred, "image", None)
-        if image_path.exists():
-            image_rgb = np.array(Image.open(image_path).convert("RGB"))
-        elif image_like is not None:
-            image_rgb = to_numpy_image(image_like)
-        else:
-            raise SystemExit(f"Could not load source image for prediction {idx}: {image_path}")
-
-        map_min = float(anomaly_map.min())
-        map_max = float(anomaly_map.max())
-        map_mins.append(map_min)
-        map_maxs.append(map_max)
-        prepared_predictions.append(
-            {
-                "index": idx,
-                "image_path": image_path,
-                "pred_label": pred_label,
-                "pred_score": pred_score,
-                "anomaly_map": anomaly_map,
-                "anomaly_map_min": map_min,
-                "anomaly_map_max": map_max,
-                "image_rgb": image_rgb,
-            }
+    calibration_result: dict[str, Any] | None = None
+    calibrated_threshold = args.calibration_threshold
+    if calibrated_threshold is None and args.calibration_path is not None:
+        calibration_predictions = predict_path(
+            path=args.calibration_path,
+            predict_dataset_cls=predict_dataset_cls,
+            engine=engine,
+            model=model,
+            ckpt_path=ckpt_path,
+            image_size=image_size,
         )
+        calibration_result = best_f1_threshold(calibration_scores(calibration_predictions))
+        if calibration_result is not None:
+            calibrated_threshold = float(calibration_result["threshold"])
+        else:
+            print("[WARN] Calibration path did not contain both good and bad labelled samples; using model labels if available.")
+    elif calibrated_threshold is not None:
+        calibration_result = {"threshold": calibrated_threshold, "source": "manual"}
+
+    prepared_predictions = predict_path(
+        path=args.input_path,
+        predict_dataset_cls=predict_dataset_cls,
+        engine=engine,
+        model=model,
+        ckpt_path=ckpt_path,
+        image_size=image_size,
+    )
+
+    map_mins = [float(item["anomaly_map_min"]) for item in prepared_predictions]
+    map_maxs = [float(item["anomaly_map_max"]) for item in prepared_predictions]
 
     global_map_min = min(map_mins) if map_mins else None
     global_map_max = max(map_maxs) if map_maxs else None
@@ -502,7 +776,7 @@ def main() -> None:
         idx = int(item["index"])
         image_path = item["image_path"]
         image_rgb = item["image_rgb"]
-        pred_label = int(item["pred_label"])
+        model_pred_label = item["pred_label"]
         pred_score = float(item["pred_score"])
         anomaly_map = item["anomaly_map"]
 
@@ -538,6 +812,13 @@ def main() -> None:
         Image.fromarray(gray_map).save(rawmap_path)
         Image.fromarray(gt_mask).save(gt_mask_path)
 
+        if calibrated_threshold is not None:
+            pred_label = 1 if pred_score >= calibrated_threshold else 0
+        elif model_pred_label is not None:
+            pred_label = int(model_pred_label)
+        else:
+            pred_label = 1 if pred_score >= 0.5 else 0
+
         pred_label_name = "bad" if pred_label == 1 else "good"
         correct = pred_label_name == gt_label if gt_label in {"good", "bad"} else ""
         row = {
@@ -546,7 +827,11 @@ def main() -> None:
             "image_name": image_path.name,
             "pred_label": pred_label,
             "pred_label_name": pred_label_name,
+            "anomalib_pred_label": "" if model_pred_label is None else int(model_pred_label),
             "pred_score": pred_score,
+            "raw_pred_score": item["raw_pred_score"],
+            "calibrated_threshold": "" if calibrated_threshold is None else calibrated_threshold,
+            "score_mode": args.score_mode,
             "gt_label": gt_label,
             "correct": correct,
             "anomaly_map_min": item["anomaly_map_min"],
@@ -577,7 +862,14 @@ def main() -> None:
         "category": args.category,
         "test_type": args.test_type,
         "model": args.model,
-        "image_size": args.image_size,
+        "image_size": format_image_size(image_size),
+        "image_height": image_size[0],
+        "image_width": image_size[1],
+        "tiling": tiling_config,
+        "score_mode": args.score_mode,
+        "calibration_path": str(args.calibration_path) if args.calibration_path else None,
+        "calibrated_threshold": calibrated_threshold,
+        "calibration_result": calibration_result,
         "heatmap_normalization": args.heatmap_normalization,
         "global_anomaly_map_min": global_map_min,
         "global_anomaly_map_max": global_map_max,
@@ -590,6 +882,10 @@ def main() -> None:
     print("=" * 80)
     print("[INFO] Inference done")
     print(f"[INFO] Checkpoint : {ckpt_path}")
+    print(f"[INFO] Image size : {format_image_size(image_size)}")
+    print(f"[INFO] Tiling     : {tiling_config}")
+    print(f"[INFO] Score mode : {args.score_mode}")
+    print(f"[INFO] Threshold  : {calibrated_threshold if calibrated_threshold is not None else 'model/default'}")
     print(f"[INFO] CSV        : {csv_path}")
     print(f"[INFO] HTML       : {html_path}")
     print("=" * 80)

@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover - import_dependencies handles the runtime 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
+DEFAULT_IMAGE_SIZE = (512, 1024)
 
 
 class SafeMVTecAD2(_MVTecAD2Base):
@@ -73,8 +74,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=30, help="Training epochs.")
     parser.add_argument("--train-batch-size", type=int, default=4, help="Override train batch size.")
     parser.add_argument("--eval-batch-size", type=int, default=4, help="Eval/test batch size.")
-    parser.add_argument("--image-size", type=int, default=256, help="Square image size for model preprocessing.")
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Square image size for model preprocessing. Overridden by --image-height/--image-width.",
+    )
+    parser.add_argument("--image-height", type=int, default=None, help="Model input height. Defaults to 512.")
+    parser.add_argument("--image-width", type=int, default=None, help="Model input width. Defaults to 1024.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
+    parser.add_argument(
+        "--tiling",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Enable tiled PatchCore processing. auto enables it for PatchCore only.",
+    )
+    parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
+    parser.add_argument(
+        "--tile-stride",
+        type=int,
+        default=None,
+        help="PatchCore tile stride. Defaults to half of --tile-size.",
+    )
     parser.add_argument(
         "--test-type",
         type=str,
@@ -105,9 +126,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_dependencies() -> tuple[Any, Any, Any, Any, Any]:
+def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     try:
+        from anomalib.callbacks import TilerConfigurationCallback
         from anomalib.data import MVTecAD2
+        from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
         from anomalib.models import EfficientAd, Patchcore
         from lightning.pytorch import seed_everything
@@ -118,11 +141,88 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any]:
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return MVTecAD2, Engine, (Patchcore, EfficientAd), seed_everything, CSVLogger
+    return MVTecAD2, Engine, (Patchcore, EfficientAd), seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
 
 
-def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: int) -> Any:
-    pre_processor_size = (image_size, image_size)
+def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
+    if args.image_height is not None or args.image_width is not None:
+        if args.image_height is None or args.image_width is None:
+            raise SystemExit("Pass both --image-height and --image-width, or neither.")
+        image_size = (args.image_height, args.image_width)
+    elif args.image_size is not None:
+        image_size = (args.image_size, args.image_size)
+    else:
+        image_size = DEFAULT_IMAGE_SIZE
+
+    if image_size[0] <= 0 or image_size[1] <= 0:
+        raise SystemExit("Image height and width must be positive integers.")
+    return image_size
+
+
+def format_image_size(image_size: tuple[int, int]) -> str:
+    return f"{image_size[0]}x{image_size[1]}"
+
+
+def should_enable_tiling(model_name: str, tiling: str) -> bool:
+    if tiling == "off":
+        return False
+    if tiling == "on":
+        return True
+    return model_name == "patchcore"
+
+
+def resolve_tiling(
+    model_name: str,
+    tiling: str,
+    tile_size: int,
+    tile_stride: int | None,
+    image_size: tuple[int, int],
+) -> dict[str, Any]:
+    enabled = should_enable_tiling(model_name, tiling)
+    if not enabled:
+        return {"enabled": False, "tile_size": None, "tile_stride": None}
+    if model_name != "patchcore":
+        raise SystemExit("Tiling is only supported for PatchCore in this demo.")
+    if tile_size <= 0:
+        raise SystemExit("--tile-size must be a positive integer.")
+
+    max_tile = min(image_size)
+    effective_tile_size = min(tile_size, max_tile)
+    if effective_tile_size != tile_size:
+        print(
+            f"[WARN] Requested tile size {tile_size} exceeds image size {format_image_size(image_size)}; "
+            f"using {effective_tile_size}.",
+        )
+
+    stride = tile_stride if tile_stride is not None else max(1, effective_tile_size // 2)
+    if stride <= 0:
+        raise SystemExit("--tile-stride must be a positive integer.")
+    if stride > effective_tile_size:
+        print(f"[WARN] Requested tile stride {stride} exceeds tile size {effective_tile_size}; using {effective_tile_size}.")
+        stride = effective_tile_size
+
+    return {"enabled": True, "tile_size": effective_tile_size, "tile_stride": stride}
+
+
+def build_tiling_callbacks(
+    tiling_config: dict[str, Any],
+    tiler_callback_cls: Any,
+    upscale_mode_cls: Any,
+) -> list[Any]:
+    if not tiling_config["enabled"]:
+        return []
+    return [
+        tiler_callback_cls(
+            enable=True,
+            tile_size=int(tiling_config["tile_size"]),
+            stride=int(tiling_config["tile_stride"]),
+            mode=upscale_mode_cls.PADDING,
+        ),
+    ]
+
+
+def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+    pre_processor_size = image_size
     if model_name == "patchcore":
         return patchcore_cls(
             backbone="wide_resnet50_2",
@@ -215,6 +315,7 @@ def build_dataset_variant_summary(dataset_root: Path, category: str) -> dict[str
     return {
         "train_good": count_variants(category_root / "train" / "good"),
         "validation_good": count_variants(category_root / "validation" / "good"),
+        "validation_bad": count_variants(category_root / "validation" / "bad"),
         "test_public_good": count_variants(category_root / "test_public" / "good"),
         "test_public_bad": count_variants(category_root / "test_public" / "bad"),
     }
@@ -231,6 +332,12 @@ def print_domain_shift_warning(summary: dict[str, dict[str, int]], selected_vari
             + ", ".join(unseen_variants)
         )
         print("[WARN] One-class models may flag these capture shifts as anomalies. Use --test-variant regular for a same-condition check.")
+
+
+def print_threshold_warning(summary: dict[str, dict[str, int]]) -> None:
+    if not summary.get("validation_bad"):
+        print("[WARN] validation/bad is empty. Anomalib's adaptive threshold may classify everything as good.")
+        print("[WARN] Use infer_demo.py --calibration-path with both good and bad images for calibrated labels.")
 
 
 def make_safe_mvtec_ad2_cls(mvtec_ad2_cls: Any) -> Any:
@@ -264,14 +371,22 @@ def make_json_safe(obj: Any) -> Any:
 
 def main() -> None:
     args = parse_args()
-    mvtec_ad2_cls, engine_cls, model_classes, seed_everything, csv_logger_cls = import_dependencies()
+    (
+        mvtec_ad2_cls,
+        engine_cls,
+        model_classes,
+        seed_everything,
+        csv_logger_cls,
+        tiler_callback_cls,
+        upscale_mode_cls,
+    ) = import_dependencies()
     patchcore_cls, efficient_ad_cls = model_classes
     safe_mvtec_ad2_cls = make_safe_mvtec_ad2_cls(mvtec_ad2_cls)
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     seed_everything(args.seed, workers=True)
-    if args.image_size <= 0:
-        raise SystemExit("--image-size must be a positive integer.")
+    image_size = resolve_image_size(args)
+    tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
     selected_test_variants = normalize_variant_selection(args.test_variant)
     dataset_variant_summary = build_dataset_variant_summary(args.dataset_root, args.category)
 
@@ -290,13 +405,15 @@ def main() -> None:
         seed=args.seed,
     )
 
-    model = build_model(args.model, patchcore_cls, efficient_ad_cls, args.image_size)
+    model = build_model(args.model, patchcore_cls, efficient_ad_cls, image_size)
     csv_logger = csv_logger_cls(
         save_dir=str(args.results_dir / "logs"),
         name=f"{args.model}_{args.category}",
     )
+    callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
 
     engine = engine_cls(
+        callbacks=callbacks,
         default_root_dir=str(args.results_dir),
         max_epochs=args.epochs,
         accelerator=args.accelerator,
@@ -309,12 +426,14 @@ def main() -> None:
     print(f"[INFO] dataset_root: {args.dataset_root}")
     print(f"[INFO] category    : {args.category}")
     print(f"[INFO] model       : {args.model}")
-    print(f"[INFO] image_size  : {args.image_size}")
+    print(f"[INFO] image_size  : {format_image_size(image_size)}")
+    print(f"[INFO] tiling      : {tiling_config}")
     print(f"[INFO] test_type   : {args.test_type}")
     print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
     print(f"[INFO] results_dir : {args.results_dir}")
     print(f"[INFO] variants    : {dataset_variant_summary}")
     print_domain_shift_warning(dataset_variant_summary, selected_test_variants)
+    print_threshold_warning(dataset_variant_summary)
     print("=" * 80)
 
     engine.fit(model=model, datamodule=datamodule)
@@ -343,7 +462,10 @@ def main() -> None:
         "category": args.category,
         "model": args.model,
         "epochs": args.epochs,
-        "image_size": args.image_size,
+        "image_size": format_image_size(image_size),
+        "image_height": image_size[0],
+        "image_width": image_size[1],
+        "tiling": tiling_config,
         "train_batch_size": train_batch_size,
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,
