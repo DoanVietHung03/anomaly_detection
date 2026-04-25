@@ -1,0 +1,49 @@
+{
+  "dataset_root": "/home/hsv/hungdv/anomaly_detection/can",
+  "category": "can",
+  "model": "efficientad",
+  "epochs": 30,
+  "image_size": 384,
+  "train_batch_size": 1,
+  "eval_batch_size": 8,
+  "num_workers": 4,
+  "test_type": "public",
+  "test_variant": "regular",
+  "dataset_variant_summary": {
+    "train_good": {
+      "regular": 412
+    },
+    "validation_good": {
+      "regular": 46
+    },
+    "test_public_good": {
+      "overexposed": 12,
+      "regular": 12,
+      "shift_1": 12,
+      "shift_2": 12,
+      "shift_3": 12,
+      "underexposed": 12
+    },
+    "test_public_bad": {
+      "overexposed": 15,
+      "regular": 15,
+      "shift_1": 15,
+      "shift_2": 15,
+      "shift_3": 15,
+      "underexposed": 15
+    }
+  },
+  "accelerator": "gpu",
+  "devices": "1",
+  "seed": 42,
+  "best_checkpoint": "/home/hsv/hungdv/anomaly_detection/runs_efficientad/EfficientAd/SafeMVTecAD2/can/v0/weights/lightning/model.ckpt",
+  "metrics_csv": "/home/hsv/hungdv/anomaly_detection/runs_efficientad/logs/efficientad_can/version_0/metrics.csv",
+  "test_results": [
+    {
+      "image_AUROC": 0.45000001788139343,
+      "image_F1Score": 0.0,
+      "pixel_AUROC": 0.5217503905296326,
+      "pixel_F1Score": 0.0
+    }
+  ]
+}
