@@ -1,0 +1,51 @@
+{
+  "dataset_root": "/home/hsv/hungdv/anomaly_detection/can",
+  "category": "can",
+  "output_dir": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe",
+  "variants": "regular",
+  "seed": 42,
+  "num_good": 4,
+  "num_bad": 4,
+  "samples": [
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/010_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/good/000_good_010_regular.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/001_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/good/001_good_001_regular.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/000_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/good/002_good_000_regular.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/004_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/good/003_good_004_regular.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/003_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/bad/000_bad_003_regular.png",
+      "label": "bad"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/014_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/bad/001_bad_014_regular.png",
+      "label": "bad"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/002_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/bad/002_bad_002_regular.png",
+      "label": "bad"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/011_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_a4000_safe/bad/003_bad_011_regular.png",
+      "label": "bad"
+    }
+  ]
+}
