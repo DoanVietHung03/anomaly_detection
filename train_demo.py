@@ -86,8 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
-        default="auto",
-        help="Enable tiled PatchCore processing. auto enables it for PatchCore only.",
+        default="off",
+        help="Enable tiled PatchCore processing. Disabled by default to keep VRAM predictable.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument(
@@ -95,6 +95,26 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="PatchCore tile stride. Defaults to half of --tile-size.",
+    )
+    parser.add_argument(
+        "--patchcore-layers",
+        nargs="+",
+        default=["layer2"],
+        choices=["layer1", "layer2", "layer3", "layer4"],
+        help="PatchCore feature layers. layer2 is the A4000-safe default for tiny defects.",
+    )
+    parser.add_argument(
+        "--patchcore-coreset-ratio",
+        type=float,
+        default=0.02,
+        help="PatchCore coreset sampling ratio. Lower values reduce memory and KNN cost.",
+    )
+    parser.add_argument("--patchcore-num-neighbors", type=int, default=9, help="PatchCore nearest-neighbor count.")
+    parser.add_argument(
+        "--patchcore-precision",
+        choices=["float16", "float32"],
+        default="float16",
+        help="PatchCore compute precision. float16 is recommended for 16 GB GPUs.",
     )
     parser.add_argument(
         "--test-type",
@@ -236,6 +256,32 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
             pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     raise ValueError(f"Unsupported model: {model_name}")
+
+
+def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
+    layers = tuple(dict.fromkeys(args.patchcore_layers))
+    if not layers:
+        raise SystemExit("--patchcore-layers must include at least one layer.")
+    if not (0.0 < args.patchcore_coreset_ratio <= 1.0):
+        raise SystemExit("--patchcore-coreset-ratio must be in the range (0, 1].")
+    if args.patchcore_num_neighbors <= 0:
+        raise SystemExit("--patchcore-num-neighbors must be a positive integer.")
+    return layers
+
+
+def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+    pre_processor_size = image_size
+    if args.model == "patchcore":
+        layers = validate_patchcore_args(args)
+        return patchcore_cls(
+            backbone="wide_resnet50_2",
+            layers=layers,
+            coreset_sampling_ratio=args.patchcore_coreset_ratio,
+            num_neighbors=args.patchcore_num_neighbors,
+            precision=args.patchcore_precision,
+            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
+    return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
 
 
 def normalize_variant_selection(variants: Iterable[str] | None) -> set[str] | None:
@@ -405,7 +451,7 @@ def main() -> None:
         seed=args.seed,
     )
 
-    model = build_model(args.model, patchcore_cls, efficient_ad_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
     csv_logger = csv_logger_cls(
         save_dir=str(args.results_dir / "logs"),
         name=f"{args.model}_{args.category}",
@@ -428,6 +474,10 @@ def main() -> None:
     print(f"[INFO] model       : {args.model}")
     print(f"[INFO] image_size  : {format_image_size(image_size)}")
     print(f"[INFO] tiling      : {tiling_config}")
+    if args.model == "patchcore":
+        print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
+        print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
+        print(f"[INFO] precision   : {args.patchcore_precision}")
     print(f"[INFO] test_type   : {args.test_type}")
     print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
     print(f"[INFO] results_dir : {args.results_dir}")
@@ -466,6 +516,10 @@ def main() -> None:
         "image_height": image_size[0],
         "image_width": image_size[1],
         "tiling": tiling_config,
+        "patchcore_layers": list(validate_patchcore_args(args)) if args.model == "patchcore" else None,
+        "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
+        "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
+        "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
         "train_batch_size": train_batch_size,
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,

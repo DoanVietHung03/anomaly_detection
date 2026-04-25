@@ -68,11 +68,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
-        default="auto",
-        help="Enable tiled PatchCore processing. auto enables it for PatchCore only.",
+        default="off",
+        help="Enable tiled PatchCore processing. Disabled by default to keep VRAM predictable.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument("--tile-stride", type=int, default=None, help="PatchCore tile stride. Defaults to half tile size.")
+    parser.add_argument(
+        "--patchcore-layers",
+        nargs="+",
+        default=["layer2"],
+        choices=["layer1", "layer2", "layer3", "layer4"],
+        help="PatchCore feature layers. layer2 is the A4000-safe default for tiny defects.",
+    )
+    parser.add_argument(
+        "--patchcore-coreset-ratio",
+        type=float,
+        default=0.02,
+        help="PatchCore coreset sampling ratio. Lower values reduce memory and KNN cost.",
+    )
+    parser.add_argument("--patchcore-num-neighbors", type=int, default=9, help="PatchCore nearest-neighbor count.")
+    parser.add_argument(
+        "--patchcore-precision",
+        choices=["float16", "float32"],
+        default="float16",
+        help="PatchCore compute precision. float16 is recommended for 16 GB GPUs.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
     parser.add_argument(
         "--skip-calibration",
@@ -280,6 +300,14 @@ def main() -> None:
         args.tiling,
         "--tile-size",
         str(args.tile_size),
+        "--patchcore-layers",
+        *args.patchcore_layers,
+        "--patchcore-coreset-ratio",
+        str(args.patchcore_coreset_ratio),
+        "--patchcore-num-neighbors",
+        str(args.patchcore_num_neighbors),
+        "--patchcore-precision",
+        args.patchcore_precision,
         "--test-variant",
         *args.test_variant,
         "--accelerator",
@@ -365,6 +393,14 @@ def main() -> None:
         args.tiling,
         "--tile-size",
         str(args.tile_size),
+        "--patchcore-layers",
+        *args.patchcore_layers,
+        "--patchcore-coreset-ratio",
+        str(args.patchcore_coreset_ratio),
+        "--patchcore-num-neighbors",
+        str(args.patchcore_num_neighbors),
+        "--patchcore-precision",
+        args.patchcore_precision,
         "--heatmap-normalization",
         args.heatmap_normalization,
         "--accelerator",

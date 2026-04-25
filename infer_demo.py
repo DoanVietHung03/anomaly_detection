@@ -90,8 +90,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
-        default="auto",
-        help="Enable tiled PatchCore inference. auto enables it for PatchCore only.",
+        default="off",
+        help="Enable tiled PatchCore inference. Disabled by default to keep VRAM predictable.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument(
@@ -99,6 +99,26 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="PatchCore tile stride. Defaults to half of --tile-size.",
+    )
+    parser.add_argument(
+        "--patchcore-layers",
+        nargs="+",
+        default=["layer2"],
+        choices=["layer1", "layer2", "layer3", "layer4"],
+        help="PatchCore feature layers. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--patchcore-coreset-ratio",
+        type=float,
+        default=0.02,
+        help="PatchCore coreset sampling ratio. Must match the trained checkpoint.",
+    )
+    parser.add_argument("--patchcore-num-neighbors", type=int, default=9, help="PatchCore nearest-neighbor count.")
+    parser.add_argument(
+        "--patchcore-precision",
+        choices=["float16", "float32"],
+        default="float16",
+        help="PatchCore compute precision. Must match the trained checkpoint.",
     )
     parser.add_argument(
         "--heatmap-normalization",
@@ -239,6 +259,32 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
             pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     raise ValueError(f"Unsupported model: {model_name}")
+
+
+def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
+    layers = tuple(dict.fromkeys(args.patchcore_layers))
+    if not layers:
+        raise SystemExit("--patchcore-layers must include at least one layer.")
+    if not (0.0 < args.patchcore_coreset_ratio <= 1.0):
+        raise SystemExit("--patchcore-coreset-ratio must be in the range (0, 1].")
+    if args.patchcore_num_neighbors <= 0:
+        raise SystemExit("--patchcore-num-neighbors must be a positive integer.")
+    return layers
+
+
+def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+    pre_processor_size = image_size
+    if args.model == "patchcore":
+        layers = validate_patchcore_args(args)
+        return patchcore_cls(
+            backbone="wide_resnet50_2",
+            layers=layers,
+            coreset_sampling_ratio=args.patchcore_coreset_ratio,
+            num_neighbors=args.patchcore_num_neighbors,
+            precision=args.patchcore_precision,
+            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
+    return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
 
 
 def flatten_predictions(predictions: Any) -> list[Any]:
@@ -732,7 +778,7 @@ def main() -> None:
     for d in (original_dir, heatmap_dir, overlay_dir, rawmap_dir, gt_mask_dir, gt_overlay_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    model = build_model(args.model, patchcore_cls, efficient_ad_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
     configure_score_mode(model, args.score_mode)
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
     engine = engine_cls(callbacks=callbacks, accelerator=args.accelerator, devices=args.devices)
@@ -866,6 +912,10 @@ def main() -> None:
         "image_height": image_size[0],
         "image_width": image_size[1],
         "tiling": tiling_config,
+        "patchcore_layers": list(validate_patchcore_args(args)) if args.model == "patchcore" else None,
+        "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
+        "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
+        "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
         "score_mode": args.score_mode,
         "calibration_path": str(args.calibration_path) if args.calibration_path else None,
         "calibrated_threshold": calibrated_threshold,
@@ -884,6 +934,10 @@ def main() -> None:
     print(f"[INFO] Checkpoint : {ckpt_path}")
     print(f"[INFO] Image size : {format_image_size(image_size)}")
     print(f"[INFO] Tiling     : {tiling_config}")
+    if args.model == "patchcore":
+        print(f"[INFO] Layers     : {','.join(validate_patchcore_args(args))}")
+        print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
+        print(f"[INFO] Precision  : {args.patchcore_precision}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Threshold  : {calibrated_threshold if calibrated_threshold is not None else 'model/default'}")
     print(f"[INFO] CSV        : {csv_path}")
