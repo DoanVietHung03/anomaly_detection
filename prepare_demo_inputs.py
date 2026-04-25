@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--variants",
         nargs="+",
-        default=["all"],
+        default=["regular"],
         choices=VARIANT_CHOICES,
         help="Capture variants to sample. Use all, or one/more of regular, overexposed, underexposed, shift_1, shift_2, shift_3.",
     )

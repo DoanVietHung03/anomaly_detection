@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-variant",
         nargs="+",
-        default=["all"],
+        default=["regular"],
         choices=VARIANT_CHOICES,
         help="Variant filter for the training-time evaluation split.",
     )

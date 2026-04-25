@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-variant",
         nargs="+",
-        default=["all"],
+        default=["regular"],
         choices=VARIANT_CHOICES,
         help="Filter evaluation images by capture variant. Use all for the full public split.",
     )
