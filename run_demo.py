@@ -127,8 +127,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--score-aggregation",
-        choices=["model", "max", "percentile", "topk-mean"],
-        default="topk-mean",
+        choices=["model", "max", "percentile", "topk-mean", "local-contrast", "local-ratio"],
+        default="local-contrast",
         help="Image score aggregation used by infer_demo.py.",
     )
     parser.add_argument(
@@ -140,8 +140,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-topk-percent",
         type=float,
-        default=0.05,
-        help="Percentage of highest ROI pixels averaged when --score-aggregation topk-mean.",
+        default=0.02,
+        help="Percentage of highest ROI pixels averaged by top-k based score aggregations.",
+    )
+    parser.add_argument(
+        "--score-local-sigma",
+        type=float,
+        default=15.0,
+        help="Gaussian sigma for local-contrast/local-ratio score aggregation.",
     )
     parser.add_argument("--accelerator", type=str, default="gpu", help="Lightning accelerator.")
     parser.add_argument("--devices", type=str, default="1", help="Lightning devices value.")
@@ -433,6 +439,8 @@ def main() -> None:
         str(args.score_percentile),
         "--score-topk-percent",
         str(args.score_topk_percent),
+        "--score-local-sigma",
+        str(args.score_local_sigma),
         "--heatmap-normalization",
         args.heatmap_normalization,
         "--accelerator",

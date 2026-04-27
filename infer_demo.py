@@ -95,8 +95,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--score-aggregation",
-        choices=["model", "max", "percentile", "topk-mean"],
-        default="topk-mean",
+        choices=["model", "max", "percentile", "topk-mean", "local-contrast", "local-ratio"],
+        default="local-contrast",
         help="Image score aggregation from the anomaly map. model keeps Anomalib's original score.",
     )
     parser.add_argument(
@@ -108,8 +108,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-topk-percent",
         type=float,
-        default=0.05,
-        help="Percentage of highest ROI pixels averaged when --score-aggregation topk-mean.",
+        default=0.02,
+        help="Percentage of highest ROI pixels averaged by top-k based score aggregations.",
+    )
+    parser.add_argument(
+        "--score-local-sigma",
+        type=float,
+        default=15.0,
+        help="Gaussian sigma for local-contrast/local-ratio score aggregation.",
     )
     parser.add_argument(
         "--tiling",
@@ -534,13 +540,24 @@ def aggregate_anomaly_score(
     aggregation: str,
     percentile: float,
     topk_percent: float,
+    local_sigma: float,
 ) -> float:
     if aggregation == "model":
         return float(model_score)
 
-    values = anomaly_map[roi_mask]
+    score_map = anomaly_map.astype(np.float32, copy=False)
+    if aggregation == "local-contrast":
+        baseline = cv2.GaussianBlur(score_map, (0, 0), sigmaX=local_sigma, sigmaY=local_sigma)
+        score_map = score_map - baseline
+        aggregation = "topk-mean"
+    elif aggregation == "local-ratio":
+        baseline = cv2.GaussianBlur(score_map, (0, 0), sigmaX=local_sigma, sigmaY=local_sigma)
+        score_map = score_map / (baseline + 1e-6)
+        aggregation = "topk-mean"
+
+    values = score_map[roi_mask]
     if values.size == 0:
-        values = anomaly_map.reshape(-1)
+        values = score_map.reshape(-1)
 
     values = values.astype(np.float32, copy=False)
     if aggregation == "max":
@@ -730,6 +747,7 @@ def predict_path(
     score_aggregation: str,
     score_percentile: float,
     score_topk_percent: float,
+    score_local_sigma: float,
 ) -> list[dict[str, Any]]:
     dataset = predict_dataset_cls(path=path, image_size=image_size)
     predictions = engine.predict(
@@ -768,6 +786,7 @@ def predict_path(
             aggregation=score_aggregation,
             percentile=score_percentile,
             topk_percent=score_topk_percent,
+            local_sigma=score_local_sigma,
         )
         prepared.append(
             {
@@ -783,6 +802,7 @@ def predict_path(
                 "roi_mask": roi_mask,
                 "roi_coverage": float(roi_mask.mean()),
                 "score_aggregation": score_aggregation,
+                "score_local_sigma": score_local_sigma,
                 "roi_mode": roi_mode,
                 "image_rgb": image_rgb,
             },
@@ -882,6 +902,8 @@ def main() -> None:
         raise SystemExit("--score-percentile must be in the range (0, 100].")
     if not (0.0 < args.score_topk_percent <= 100.0):
         raise SystemExit("--score-topk-percent must be in the range (0, 100].")
+    if args.score_local_sigma <= 0.0:
+        raise SystemExit("--score-local-sigma must be positive.")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     original_dir = args.output_dir / "originals"
@@ -914,6 +936,7 @@ def main() -> None:
             score_aggregation=args.score_aggregation,
             score_percentile=args.score_percentile,
             score_topk_percent=args.score_topk_percent,
+            score_local_sigma=args.score_local_sigma,
         )
         calibration_result = best_f1_threshold(calibration_scores(calibration_predictions))
         if calibration_result is not None:
@@ -934,6 +957,7 @@ def main() -> None:
         score_aggregation=args.score_aggregation,
         score_percentile=args.score_percentile,
         score_topk_percent=args.score_topk_percent,
+        score_local_sigma=args.score_local_sigma,
     )
 
     map_mins = [float(item["anomaly_map_min"]) for item in prepared_predictions]
@@ -1010,6 +1034,7 @@ def main() -> None:
             "calibrated_threshold": "" if calibrated_threshold is None else calibrated_threshold,
             "score_mode": args.score_mode,
             "score_aggregation": item["score_aggregation"],
+            "score_local_sigma": item["score_local_sigma"],
             "roi_mode": item["roi_mode"],
             "roi_coverage": item["roi_coverage"],
             "gt_label": gt_label,
@@ -1056,6 +1081,7 @@ def main() -> None:
         "score_aggregation": args.score_aggregation,
         "score_percentile": args.score_percentile,
         "score_topk_percent": args.score_topk_percent,
+        "score_local_sigma": args.score_local_sigma,
         "roi_mode": args.roi_mode,
         "calibration_path": str(args.calibration_path) if args.calibration_path else None,
         "calibrated_threshold": calibrated_threshold,

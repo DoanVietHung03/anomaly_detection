@@ -45,6 +45,7 @@ class PredictionRow:
     calibrated_threshold: float | None = None
     score_mode: str | None = None
     score_aggregation: str | None = None
+    score_local_sigma: float | None = None
     roi_mode: str | None = None
     roi_coverage: float | None = None
     original_rel: str | None = None
@@ -254,6 +255,7 @@ def read_predictions(path: Path) -> list[PredictionRow]:
                     calibrated_threshold=safe_float(raw.get("calibrated_threshold")),
                     score_mode=raw.get("score_mode") or None,
                     score_aggregation=raw.get("score_aggregation") or None,
+                    score_local_sigma=safe_float(raw.get("score_local_sigma")),
                     roi_mode=raw.get("roi_mode") or None,
                     roi_coverage=safe_float(raw.get("roi_coverage")),
                     original_rel=raw.get("original_rel") or None,
