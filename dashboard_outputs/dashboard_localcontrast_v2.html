@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anomaly Combined Report</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --text: #172033;
+      --muted: #5c667a;
+      --line: #d9dee8;
+      --panel: #ffffff;
+      --accent: #0f766e;
+      --accent-2: #c2410c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Arial, Helvetica, sans-serif;
+      line-height: 1.45;
+    }
+    header {
+      background: #172033;
+      color: #ffffff;
+      padding: 28px 32px;
+      border-bottom: 5px solid var(--accent);
+    }
+    header h1 { margin: 0 0 8px 0; font-size: 28px; font-weight: 700; letter-spacing: 0; }
+    header p { margin: 0; color: #d8dee9; }
+    main { max-width: 1220px; margin: 0 auto; padding: 24px; }
+    .overview {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .tile, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .tile { padding: 14px 16px; min-height: 78px; }
+    .tile span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+    .tile strong { display: block; font-size: 24px; line-height: 1.1; }
+    .panel { padding: 18px; margin-bottom: 18px; }
+    .panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+    }
+    h2, h3, h4 { margin: 0; letter-spacing: 0; }
+    h2 { font-size: 20px; margin-bottom: 14px; }
+    h3 { font-size: 20px; }
+    h4 { font-size: 15px; margin: 16px 0 10px 0; }
+    p { margin: 6px 0 0 0; color: var(--muted); }
+    code {
+      color: #253048;
+      background: #eef1f6;
+      border-radius: 4px;
+      padding: 2px 5px;
+      white-space: normal;
+      word-break: break-word;
+    }
+    .tiles {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .chart { width: 100%; height: auto; display: block; }
+    .chart-title { fill: #253048; font-size: 14px; font-weight: 700; }
+    .gridline { stroke: #d9dee8; stroke-width: 1; }
+    .axis-label, .legend-label, .x-label { fill: #5c667a; font-size: 12px; }
+    .curves {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      align-items: start;
+      margin-bottom: 8px;
+    }
+    .curve-summary {
+      color: #253048;
+      background: #eef7f4;
+      border: 1px solid #b8d8d1;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+    .sample {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #ffffff;
+    }
+    .sample-meta {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .sample-meta strong, .sample-meta span { display: block; }
+    .sample-meta span { color: var(--muted); font-size: 13px; margin-top: 3px; }
+    .sample-images {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+    figure { margin: 0; background: #ffffff; }
+    figure img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: contain;
+      background: #f8fafc;
+    }
+    figcaption {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      padding: 6px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 11px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+    th { color: #253048; background: #eef1f6; font-weight: 700; }
+    tr:last-child td, tr:last-child th { border-bottom: none; }
+    .matrix th, .matrix td { text-align: center; }
+    .matrix th:first-child { text-align: left; }
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      color: var(--muted);
+      background: #ffffff;
+    }
+    @media (max-width: 980px) {
+      main { padding: 16px; }
+      .overview, .tiles, .two-col, .curves { grid-template-columns: 1fr; }
+      .sample-images { grid-template-columns: 1fr; }
+      header { padding: 22px 18px; }
+      header h1 { font-size: 24px; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Anomaly Combined Report</h1>
+    <p>Training summaries, threshold curves, score distributions, and image heatmap evidence. Generated at 2026-04-27 15:50:42.</p>
+  </header>
+  <main>
+    <section class="overview">
+      <div class="tile"><span>Models</span><strong>1</strong></div>
+      <div class="tile"><span>Training summaries</span><strong>1</strong></div>
+      <div class="tile"><span>Training CSVs</span><strong>1</strong></div>
+      <div class="tile"><span>Prediction CSVs</span><strong>1</strong></div>
+      <div class="tile"><span>Prediction rows</span><strong>15</strong></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Final Test Metrics</h2>
+          <p>Values come from train_summary JSON files after engine.test.</p>
+        </div>
+      </div>
+      <svg class="chart" viewBox="0 0 920 340" role="img" aria-label="Final metrics chart">
+<line class="gridline" x1="74" y1="254.0" x2="892" y2="254.0" />
+<text class="axis-label" x="62" y="258.0" text-anchor="end">0.00</text>
+<line class="gridline" x1="74" y1="199.0" x2="892" y2="199.0" />
+<text class="axis-label" x="62" y="203.0" text-anchor="end">0.25</text>
+<line class="gridline" x1="74" y1="144.0" x2="892" y2="144.0" />
+<text class="axis-label" x="62" y="148.0" text-anchor="end">0.50</text>
+<line class="gridline" x1="74" y1="89.0" x2="892" y2="89.0" />
+<text class="axis-label" x="62" y="93.0" text-anchor="end">0.75</text>
+<line class="gridline" x1="74" y1="34.0" x2="892" y2="34.0" />
+<text class="axis-label" x="62" y="38.0" text-anchor="end">1.00</text>
+<rect x="162.2" y="106.1" width="25.0" height="147.9" rx="3" fill="#0f766e"><title>PatchCore image AUROC: 0.6722</title></rect>
+<text class="x-label" x="176.2" y="292" text-anchor="middle">image AUROC</text>
+<rect x="366.8" y="254.0" width="25.0" height="0.0" rx="3" fill="#0f766e"><title>PatchCore image F1Score: 0.0000</title></rect>
+<text class="x-label" x="380.8" y="292" text-anchor="middle">image F1Score</text>
+<rect x="571.2" y="51.2" width="25.0" height="202.8" rx="3" fill="#0f766e"><title>PatchCore pixel AUROC: 0.9218</title></rect>
+<text class="x-label" x="585.2" y="292" text-anchor="middle">pixel AUROC</text>
+<rect x="775.8" y="254.0" width="25.0" height="0.0" rx="3" fill="#0f766e"><title>PatchCore pixel F1Score: 0.0000</title></rect>
+<text class="x-label" x="789.8" y="292" text-anchor="middle">pixel F1Score</text>
+<rect x="74" y="310" width="12" height="12" rx="2" fill="#0f766e" />
+<text class="legend-label" x="92" y="320">PatchCore</text>
+</svg>
+      <table><thead><tr><th>Model</th><th>Category</th><th>Image AUROC</th><th>Image F1</th><th>Pixel AUROC</th><th>Pixel F1</th><th>Summary</th></tr></thead><tbody><tr><td>PatchCore</td><td>can</td><td>0.6722</td><td>0.0000</td><td>0.9218</td><td>0.0000</td><td><code>runs_patchcore_768_roi/train_summary_patchcore_can.json</code></td></tr></tbody></table>
+    </section>
+
+    <section class="panel">
+  <div class="panel-head">
+    <div>
+      <h3>PatchCore</h3>
+      <p>Predictions: <code>demo_outputs_patchcore_localcontrast_v2/predictions.csv</code></p>
+      <p>Training metrics: <code>runs_patchcore_768_roi/logs/patchcore_can/version_0/metrics.csv</code></p>
+    </div>
+  </div>
+  <div class="tiles"><div class="tile"><span>Samples</span><strong>15</strong></div><div class="tile"><span>Accuracy</span><strong>86.7%</strong></div><div class="tile"><span>Precision</span><strong>88.9%</strong></div><div class="tile"><span>Recall</span><strong>88.9%</strong></div><div class="tile"><span>F1</span><strong>88.9%</strong></div></div>
+  <h4>Training Curves</h4>
+  <div class="empty">No train_loss metrics found yet. Run training again after the CSVLogger change.</div>
+  <h4>Threshold Curves</h4>
+  <div class="curve-summary">Best F1 threshold: <strong>4.3816</strong> (F1 90.0%, precision 81.8%, recall 100.0%)</div>
+<div class="curves">
+  <div>
+    <svg class="chart" viewBox="0 0 420 300" role="img" aria-label="ROC AUC 0.9259">
+<text class="chart-title" x="54" y="18">ROC AUC 0.9259</text>
+<line class="gridline" x1="54" y1="242.0" x2="402" y2="242.0" />
+<line class="gridline" x1="54.0" y1="28" x2="54.0" y2="242" />
+<text class="axis-label" x="46" y="246.0" text-anchor="end">0.00</text>
+<text class="axis-label" x="54.0" y="264" text-anchor="middle">0.00</text>
+<line class="gridline" x1="54" y1="188.5" x2="402" y2="188.5" />
+<line class="gridline" x1="141.0" y1="28" x2="141.0" y2="242" />
+<text class="axis-label" x="46" y="192.5" text-anchor="end">0.25</text>
+<text class="axis-label" x="141.0" y="264" text-anchor="middle">0.25</text>
+<line class="gridline" x1="54" y1="135.0" x2="402" y2="135.0" />
+<line class="gridline" x1="228.0" y1="28" x2="228.0" y2="242" />
+<text class="axis-label" x="46" y="139.0" text-anchor="end">0.50</text>
+<text class="axis-label" x="228.0" y="264" text-anchor="middle">0.50</text>
+<line class="gridline" x1="54" y1="81.5" x2="402" y2="81.5" />
+<line class="gridline" x1="315.0" y1="28" x2="315.0" y2="242" />
+<text class="axis-label" x="46" y="85.5" text-anchor="end">0.75</text>
+<text class="axis-label" x="315.0" y="264" text-anchor="middle">0.75</text>
+<line class="gridline" x1="54" y1="28.0" x2="402" y2="28.0" />
+<line class="gridline" x1="402.0" y1="28" x2="402.0" y2="242" />
+<text class="axis-label" x="46" y="32.0" text-anchor="end">1.00</text>
+<text class="axis-label" x="402.0" y="264" text-anchor="middle">1.00</text>
+<line x1="54.0" y1="242.0" x2="402.0" y2="28.0" stroke="#94a3b8" stroke-dasharray="5 5" stroke-width="1.4" />
+<path d="M 54.0 242.0 L 54.0 218.2 L 54.0 194.4 L 54.0 170.7 L 54.0 146.9 L 54.0 123.1 L 54.0 99.3 L 112.0 99.3 L 112.0 75.6 L 112.0 51.8 L 170.0 51.8 L 170.0 28.0 L 228.0 28.0 L 286.0 28.0 L 344.0 28.0 L 402.0 28.0" fill="none" stroke="#2563eb" stroke-width="3" stroke-linejoin="round" />
+<circle cx="54.0" cy="242.0" r="2.6" fill="#2563eb"><title>FPR: 0.0000, TPR: 0.0000</title></circle>
+<circle cx="54.0" cy="218.2" r="2.6" fill="#2563eb"><title>FPR: 0.0000, TPR: 0.1111</title></circle>
+<circle cx="54.0" cy="194.4" r="2.6" fill="#2563eb"><title>FPR: 0.0000, TPR: 0.2222</title></circle>
+<circle cx="54.0" cy="170.7" r="2.6" fill="#2563eb"><title>FPR: 0.0000, TPR: 0.3333</title></circle>
+<circle cx="54.0" cy="146.9" r="2.6" fill="#2563eb"><title>FPR: 0.0000, TPR: 0.4444</title></circle>
+<circle cx="54.0" cy="123.1" r="2.6" fill="#2563eb"><title>FPR: 0.0000, TPR: 0.5556</title></circle>
+<circle cx="54.0" cy="99.3" r="2.6" fill="#2563eb"><title>FPR: 0.0000, TPR: 0.6667</title></circle>
+<circle cx="112.0" cy="99.3" r="2.6" fill="#2563eb"><title>FPR: 0.1667, TPR: 0.6667</title></circle>
+<circle cx="112.0" cy="75.6" r="2.6" fill="#2563eb"><title>FPR: 0.1667, TPR: 0.7778</title></circle>
+<circle cx="112.0" cy="51.8" r="2.6" fill="#2563eb"><title>FPR: 0.1667, TPR: 0.8889</title></circle>
+<circle cx="170.0" cy="51.8" r="2.6" fill="#2563eb"><title>FPR: 0.3333, TPR: 0.8889</title></circle>
+<circle cx="170.0" cy="28.0" r="2.6" fill="#2563eb"><title>FPR: 0.3333, TPR: 1.0000</title></circle>
+<circle cx="228.0" cy="28.0" r="2.6" fill="#2563eb"><title>FPR: 0.5000, TPR: 1.0000</title></circle>
+<circle cx="286.0" cy="28.0" r="2.6" fill="#2563eb"><title>FPR: 0.6667, TPR: 1.0000</title></circle>
+<circle cx="344.0" cy="28.0" r="2.6" fill="#2563eb"><title>FPR: 0.8333, TPR: 1.0000</title></circle>
+<circle cx="402.0" cy="28.0" r="2.6" fill="#2563eb"><title>FPR: 1.0000, TPR: 1.0000</title></circle>
+<text class="axis-label" x="228.0" y="288" text-anchor="middle">FPR</text>
+<text class="axis-label" transform="translate(16 135.0) rotate(-90)" text-anchor="middle">TPR</text>
+</svg>
+  </div>
+  <div>
+    <svg class="chart" viewBox="0 0 420 300" role="img" aria-label="PR AUC 0.9387">
+<text class="chart-title" x="54" y="18">PR AUC 0.9387</text>
+<line class="gridline" x1="54" y1="242.0" x2="402" y2="242.0" />
+<line class="gridline" x1="54.0" y1="28" x2="54.0" y2="242" />
+<text class="axis-label" x="46" y="246.0" text-anchor="end">0.00</text>
+<text class="axis-label" x="54.0" y="264" text-anchor="middle">0.00</text>
+<line class="gridline" x1="54" y1="188.5" x2="402" y2="188.5" />
+<line class="gridline" x1="141.0" y1="28" x2="141.0" y2="242" />
+<text class="axis-label" x="46" y="192.5" text-anchor="end">0.25</text>
+<text class="axis-label" x="141.0" y="264" text-anchor="middle">0.25</text>
+<line class="gridline" x1="54" y1="135.0" x2="402" y2="135.0" />
+<line class="gridline" x1="228.0" y1="28" x2="228.0" y2="242" />
+<text class="axis-label" x="46" y="139.0" text-anchor="end">0.50</text>
+<text class="axis-label" x="228.0" y="264" text-anchor="middle">0.50</text>
+<line class="gridline" x1="54" y1="81.5" x2="402" y2="81.5" />
+<line class="gridline" x1="315.0" y1="28" x2="315.0" y2="242" />
+<text class="axis-label" x="46" y="85.5" text-anchor="end">0.75</text>
+<text class="axis-label" x="315.0" y="264" text-anchor="middle">0.75</text>
+<line class="gridline" x1="54" y1="28.0" x2="402" y2="28.0" />
+<line class="gridline" x1="402.0" y1="28" x2="402.0" y2="242" />
+<text class="axis-label" x="46" y="32.0" text-anchor="end">1.00</text>
+<text class="axis-label" x="402.0" y="264" text-anchor="middle">1.00</text>
+<path d="M 54.0 28.0 L 92.7 28.0 L 131.3 28.0 L 170.0 28.0 L 208.7 28.0 L 247.3 28.0 L 286.0 58.6 L 286.0 28.0 L 324.7 54.8 L 363.3 70.8 L 363.3 51.8 L 402.0 113.6 L 402.0 104.4 L 402.0 93.8 L 402.0 81.5 L 402.0 66.9" fill="none" stroke="#c2410c" stroke-width="3" stroke-linejoin="round" />
+<circle cx="54.0" cy="28.0" r="2.6" fill="#c2410c"><title>Recall: 0.0000, Precision: 1.0000</title></circle>
+<circle cx="92.7" cy="28.0" r="2.6" fill="#c2410c"><title>Recall: 0.1111, Precision: 1.0000</title></circle>
+<circle cx="131.3" cy="28.0" r="2.6" fill="#c2410c"><title>Recall: 0.2222, Precision: 1.0000</title></circle>
+<circle cx="170.0" cy="28.0" r="2.6" fill="#c2410c"><title>Recall: 0.3333, Precision: 1.0000</title></circle>
+<circle cx="208.7" cy="28.0" r="2.6" fill="#c2410c"><title>Recall: 0.4444, Precision: 1.0000</title></circle>
+<circle cx="247.3" cy="28.0" r="2.6" fill="#c2410c"><title>Recall: 0.5556, Precision: 1.0000</title></circle>
+<circle cx="286.0" cy="58.6" r="2.6" fill="#c2410c"><title>Recall: 0.6667, Precision: 0.8571</title></circle>
+<circle cx="286.0" cy="28.0" r="2.6" fill="#c2410c"><title>Recall: 0.6667, Precision: 1.0000</title></circle>
+<circle cx="324.7" cy="54.8" r="2.6" fill="#c2410c"><title>Recall: 0.7778, Precision: 0.8750</title></circle>
+<circle cx="363.3" cy="70.8" r="2.6" fill="#c2410c"><title>Recall: 0.8889, Precision: 0.8000</title></circle>
+<circle cx="363.3" cy="51.8" r="2.6" fill="#c2410c"><title>Recall: 0.8889, Precision: 0.8889</title></circle>
+<circle cx="402.0" cy="113.6" r="2.6" fill="#c2410c"><title>Recall: 1.0000, Precision: 0.6000</title></circle>
+<circle cx="402.0" cy="104.4" r="2.6" fill="#c2410c"><title>Recall: 1.0000, Precision: 0.6429</title></circle>
+<circle cx="402.0" cy="93.8" r="2.6" fill="#c2410c"><title>Recall: 1.0000, Precision: 0.6923</title></circle>
+<circle cx="402.0" cy="81.5" r="2.6" fill="#c2410c"><title>Recall: 1.0000, Precision: 0.7500</title></circle>
+<circle cx="402.0" cy="66.9" r="2.6" fill="#c2410c"><title>Recall: 1.0000, Precision: 0.8182</title></circle>
+<text class="axis-label" x="228.0" y="288" text-anchor="middle">Recall</text>
+<text class="axis-label" transform="translate(16 135.0) rotate(-90)" text-anchor="middle">Precision</text>
+</svg>
+  </div>
+</div>
+  <div class="two-col">
+    <div>
+      <h4>Score Distribution</h4>
+      <svg class="chart" viewBox="0 0 760 310" role="img" aria-label="Score histogram for PatchCore">
+<line class="gridline" x1="64" y1="236.0" x2="736" y2="236.0" />
+<text class="axis-label" x="54" y="240.0" text-anchor="end">0</text>
+<line class="gridline" x1="64" y1="184.0" x2="736" y2="184.0" />
+<text class="axis-label" x="54" y="188.0" text-anchor="end">1</text>
+<line class="gridline" x1="64" y1="132.0" x2="736" y2="132.0" />
+<text class="axis-label" x="54" y="136.0" text-anchor="end">2</text>
+<line class="gridline" x1="64" y1="80.0" x2="736" y2="80.0" />
+<text class="axis-label" x="54" y="84.0" text-anchor="end">3</text>
+<line class="gridline" x1="64" y1="28.0" x2="736" y2="28.0" />
+<text class="axis-label" x="54" y="32.0" text-anchor="end">4</text>
+<rect x="74.8" y="80.0" width="16.1" height="156.0" rx="2" fill="#0f766e"><title>good scores 3.805-4.145: 3</title></rect>
+<rect x="92.9" y="236.0" width="16.1" height="0.0" rx="2" fill="#c2410c"><title>bad scores 3.805-4.145: 0</title></rect>
+<rect x="142.0" y="132.0" width="16.1" height="104.0" rx="2" fill="#0f766e"><title>good scores 4.145-4.486: 2</title></rect>
+<rect x="160.1" y="132.0" width="16.1" height="104.0" rx="2" fill="#c2410c"><title>bad scores 4.145-4.486: 2</title></rect>
+<rect x="209.2" y="184.0" width="16.1" height="52.0" rx="2" fill="#0f766e"><title>good scores 4.486-4.827: 1</title></rect>
+<rect x="227.3" y="28.0" width="16.1" height="208.0" rx="2" fill="#c2410c"><title>bad scores 4.486-4.827: 4</title></rect>
+<rect x="276.4" y="236.0" width="16.1" height="0.0" rx="2" fill="#0f766e"><title>good scores 4.827-5.167: 0</title></rect>
+<rect x="294.5" y="236.0" width="16.1" height="0.0" rx="2" fill="#c2410c"><title>bad scores 4.827-5.167: 0</title></rect>
+<rect x="343.6" y="236.0" width="16.1" height="0.0" rx="2" fill="#0f766e"><title>good scores 5.167-5.508: 0</title></rect>
+<rect x="361.7" y="132.0" width="16.1" height="104.0" rx="2" fill="#c2410c"><title>bad scores 5.167-5.508: 2</title></rect>
+<rect x="410.8" y="236.0" width="16.1" height="0.0" rx="2" fill="#0f766e"><title>good scores 5.508-5.849: 0</title></rect>
+<rect x="428.9" y="236.0" width="16.1" height="0.0" rx="2" fill="#c2410c"><title>bad scores 5.508-5.849: 0</title></rect>
+<rect x="478.0" y="236.0" width="16.1" height="0.0" rx="2" fill="#0f766e"><title>good scores 5.849-6.190: 0</title></rect>
+<rect x="496.1" y="236.0" width="16.1" height="0.0" rx="2" fill="#c2410c"><title>bad scores 5.849-6.190: 0</title></rect>
+<rect x="545.2" y="236.0" width="16.1" height="0.0" rx="2" fill="#0f766e"><title>good scores 6.190-6.530: 0</title></rect>
+<rect x="563.3" y="236.0" width="16.1" height="0.0" rx="2" fill="#c2410c"><title>bad scores 6.190-6.530: 0</title></rect>
+<rect x="612.4" y="236.0" width="16.1" height="0.0" rx="2" fill="#0f766e"><title>good scores 6.530-6.871: 0</title></rect>
+<rect x="630.5" y="236.0" width="16.1" height="0.0" rx="2" fill="#c2410c"><title>bad scores 6.530-6.871: 0</title></rect>
+<rect x="679.6" y="236.0" width="16.1" height="0.0" rx="2" fill="#0f766e"><title>good scores 6.871-7.212: 0</title></rect>
+<rect x="697.7" y="184.0" width="16.1" height="52.0" rx="2" fill="#c2410c"><title>bad scores 6.871-7.212: 1</title></rect>
+<text class="axis-label" x="64" y="266" text-anchor="middle">3.80</text>
+<text class="axis-label" x="736" y="266" text-anchor="middle">7.21</text>
+<text class="axis-label" x="400.0" y="290" text-anchor="middle">Anomaly score</text>
+<rect x="506" y="252" width="12" height="12" rx="2" fill="#0f766e" />
+<text class="legend-label" x="524" y="262">good</text>
+<rect x="592" y="252" width="12" height="12" rx="2" fill="#c2410c" />
+<text class="legend-label" x="610" y="262">bad</text>
+</svg>
+    </div>
+    <div>
+      <h4>Score Summary</h4>
+      <table><thead><tr><th>GT label</th><th>Count</th><th>Mean</th><th>Median</th><th>Min</th><th>Max</th></tr></thead><tbody><tr><td>good</td><td>6</td><td>4.2349</td><td>4.2054</td><td>3.9596</td><td>4.5540</td></tr><tr><td>bad</td><td>9</td><td>5.0035</td><td>4.6848</td><td>4.3816</td><td>7.0568</td></tr></tbody></table>
+      <h4>Confusion Matrix</h4>
+      <table class="matrix"><thead><tr><th>Ground truth</th><th>Pred good</th><th>Pred bad</th></tr></thead><tbody><tr><th>good</th><td>5</td><td>1</td></tr><tr><th>bad</th><td>1</td><td>8</td></tr></tbody></table>
+    </div>
+  </div>
+  <h4>Image, GT Mask, Heatmap, Overlay</h4>
+  <div class="gallery"><article class="sample"><div class="sample-meta"><strong>001_bad_003_regular.png</strong><span>GT bad | Pred bad | Score 7.0568 | Model 35.9062 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0001_001_bad_003_regular.png" alt="Original 001_bad_003_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0001_001_bad_003_regular.png" alt="GT Mask 001_bad_003_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0001_001_bad_003_regular.png" alt="GT Overlay 001_bad_003_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0001_001_bad_003_regular.png" alt="ROI Mask 001_bad_003_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0001_001_bad_003_regular.png" alt="Heatmap 001_bad_003_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0001_001_bad_003_regular.png" alt="Pred Overlay 001_bad_003_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>005_bad_007_regular.png</strong><span>GT bad | Pred bad | Score 5.2749 | Model 28.0000 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0005_005_bad_007_regular.png" alt="Original 005_bad_007_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0005_005_bad_007_regular.png" alt="GT Mask 005_bad_007_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0005_005_bad_007_regular.png" alt="GT Overlay 005_bad_007_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0005_005_bad_007_regular.png" alt="ROI Mask 005_bad_007_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0005_005_bad_007_regular.png" alt="Heatmap 005_bad_007_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0005_005_bad_007_regular.png" alt="Pred Overlay 005_bad_007_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>006_bad_009_regular.png</strong><span>GT bad | Pred bad | Score 5.2713 | Model 36.3125 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0006_006_bad_009_regular.png" alt="Original 006_bad_009_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0006_006_bad_009_regular.png" alt="GT Mask 006_bad_009_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0006_006_bad_009_regular.png" alt="GT Overlay 006_bad_009_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0006_006_bad_009_regular.png" alt="ROI Mask 006_bad_009_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0006_006_bad_009_regular.png" alt="Heatmap 006_bad_009_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0006_006_bad_009_regular.png" alt="Pred Overlay 006_bad_009_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>004_bad_006_regular.png</strong><span>GT bad | Pred bad | Score 4.7677 | Model 33.3125 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0004_004_bad_006_regular.png" alt="Original 004_bad_006_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0004_004_bad_006_regular.png" alt="GT Mask 004_bad_006_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0004_004_bad_006_regular.png" alt="GT Overlay 004_bad_006_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0004_004_bad_006_regular.png" alt="ROI Mask 004_bad_006_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0004_004_bad_006_regular.png" alt="Heatmap 004_bad_006_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0004_004_bad_006_regular.png" alt="Pred Overlay 004_bad_006_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>003_bad_005_regular.png</strong><span>GT bad | Pred bad | Score 4.6848 | Model 28.6406 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0003_003_bad_005_regular.png" alt="Original 003_bad_005_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0003_003_bad_005_regular.png" alt="GT Mask 003_bad_005_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0003_003_bad_005_regular.png" alt="GT Overlay 003_bad_005_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0003_003_bad_005_regular.png" alt="ROI Mask 003_bad_005_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0003_003_bad_005_regular.png" alt="Heatmap 003_bad_005_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0003_003_bad_005_regular.png" alt="Pred Overlay 003_bad_005_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>000_bad_000_regular.png</strong><span>GT bad | Pred bad | Score 4.6257 | Model 33.4688 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0000_000_bad_000_regular.png" alt="Original 000_bad_000_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0000_000_bad_000_regular.png" alt="GT Mask 000_bad_000_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0000_000_bad_000_regular.png" alt="GT Overlay 000_bad_000_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0000_000_bad_000_regular.png" alt="ROI Mask 000_bad_000_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0000_000_bad_000_regular.png" alt="Heatmap 000_bad_000_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0000_000_bad_000_regular.png" alt="Pred Overlay 000_bad_000_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>001_good_005_regular.png</strong><span>GT good | Pred bad | Score 4.5540 | Model 32.2812 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0010_001_good_005_regular.png" alt="Original 001_good_005_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0010_001_good_005_regular.png" alt="GT Mask 001_good_005_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0010_001_good_005_regular.png" alt="GT Overlay 001_good_005_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0010_001_good_005_regular.png" alt="ROI Mask 001_good_005_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0010_001_good_005_regular.png" alt="Heatmap 001_good_005_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0010_001_good_005_regular.png" alt="Pred Overlay 001_good_005_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>007_bad_013_regular.png</strong><span>GT bad | Pred bad | Score 4.4892 | Model 31.4062 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0007_007_bad_013_regular.png" alt="Original 007_bad_013_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0007_007_bad_013_regular.png" alt="GT Mask 007_bad_013_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0007_007_bad_013_regular.png" alt="GT Overlay 007_bad_013_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0007_007_bad_013_regular.png" alt="ROI Mask 007_bad_013_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0007_007_bad_013_regular.png" alt="Heatmap 007_bad_013_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0007_007_bad_013_regular.png" alt="Pred Overlay 007_bad_013_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>002_bad_004_regular.png</strong><span>GT bad | Pred bad | Score 4.4799 | Model 27.6406 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0002_002_bad_004_regular.png" alt="Original 002_bad_004_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0002_002_bad_004_regular.png" alt="GT Mask 002_bad_004_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0002_002_bad_004_regular.png" alt="GT Overlay 002_bad_004_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0002_002_bad_004_regular.png" alt="ROI Mask 002_bad_004_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0002_002_bad_004_regular.png" alt="Heatmap 002_bad_004_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0002_002_bad_004_regular.png" alt="Pred Overlay 002_bad_004_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>000_good_002_regular.png</strong><span>GT good | Pred good | Score 4.4085 | Model 32.0938 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0009_000_good_002_regular.png" alt="Original 000_good_002_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0009_000_good_002_regular.png" alt="GT Mask 000_good_002_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0009_000_good_002_regular.png" alt="GT Overlay 000_good_002_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0009_000_good_002_regular.png" alt="ROI Mask 000_good_002_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0009_000_good_002_regular.png" alt="Heatmap 000_good_002_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0009_000_good_002_regular.png" alt="Pred Overlay 000_good_002_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>008_bad_014_regular.png</strong><span>GT bad | Pred good | Score 4.3816 | Model 33.0000 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0008_008_bad_014_regular.png" alt="Original 008_bad_014_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0008_008_bad_014_regular.png" alt="GT Mask 008_bad_014_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0008_008_bad_014_regular.png" alt="GT Overlay 008_bad_014_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0008_008_bad_014_regular.png" alt="ROI Mask 008_bad_014_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0008_008_bad_014_regular.png" alt="Heatmap 008_bad_014_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0008_008_bad_014_regular.png" alt="Pred Overlay 008_bad_014_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>004_good_008_regular.png</strong><span>GT good | Pred good | Score 4.2820 | Model 28.3594 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0013_004_good_008_regular.png" alt="Original 004_good_008_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0013_004_good_008_regular.png" alt="GT Mask 004_good_008_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0013_004_good_008_regular.png" alt="GT Overlay 004_good_008_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0013_004_good_008_regular.png" alt="ROI Mask 004_good_008_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0013_004_good_008_regular.png" alt="Heatmap 004_good_008_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0013_004_good_008_regular.png" alt="Pred Overlay 004_good_008_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>002_good_006_regular.png</strong><span>GT good | Pred good | Score 4.1287 | Model 31.5000 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0011_002_good_006_regular.png" alt="Original 002_good_006_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0011_002_good_006_regular.png" alt="GT Mask 002_good_006_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0011_002_good_006_regular.png" alt="GT Overlay 002_good_006_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0011_002_good_006_regular.png" alt="ROI Mask 002_good_006_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0011_002_good_006_regular.png" alt="Heatmap 002_good_006_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0011_002_good_006_regular.png" alt="Pred Overlay 002_good_006_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>003_good_007_regular.png</strong><span>GT good | Pred good | Score 4.0767 | Model 31.6875 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0012_003_good_007_regular.png" alt="Original 003_good_007_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0012_003_good_007_regular.png" alt="GT Mask 003_good_007_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0012_003_good_007_regular.png" alt="GT Overlay 003_good_007_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0012_003_good_007_regular.png" alt="ROI Mask 003_good_007_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0012_003_good_007_regular.png" alt="Heatmap 003_good_007_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0012_003_good_007_regular.png" alt="Pred Overlay 003_good_007_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article><article class="sample"><div class="sample-meta"><strong>005_good_009_regular.png</strong><span>GT good | Pred good | Score 3.9596 | Model 27.7812 | local-contrast/foreground | Threshold 4.4305</span></div><div class="sample-images"><figure><img src="../demo_outputs_patchcore_localcontrast_v2/originals/0014_005_good_009_regular.png" alt="Original 005_good_009_regular.png"><figcaption>Original</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_masks/0014_005_good_009_regular.png" alt="GT Mask 005_good_009_regular.png"><figcaption>GT Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/gt_overlays/0014_005_good_009_regular.png" alt="GT Overlay 005_good_009_regular.png"><figcaption>GT Overlay</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/roi_masks/0014_005_good_009_regular.png" alt="ROI Mask 005_good_009_regular.png"><figcaption>ROI Mask</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/heatmaps/0014_005_good_009_regular.png" alt="Heatmap 005_good_009_regular.png"><figcaption>Heatmap</figcaption></figure><figure><img src="../demo_outputs_patchcore_localcontrast_v2/overlays/0014_005_good_009_regular.png" alt="Pred Overlay 005_good_009_regular.png"><figcaption>Pred Overlay</figcaption></figure></div></article></div>
+</section>
+  </main>
+</body>
+</html>

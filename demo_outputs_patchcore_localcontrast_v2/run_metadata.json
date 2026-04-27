@@ -1,0 +1,47 @@
+{
+  "checkpoint": "runs_patchcore_768_roi/Patchcore/SafeMVTecAD2/can/v0/weights/lightning/model.ckpt",
+  "input_path": "demo_inputs_patchcore_768_roi",
+  "dataset_root": "can",
+  "category": "can",
+  "test_type": "public",
+  "model": "patchcore",
+  "image_size": "640x1280",
+  "image_height": 640,
+  "image_width": 1280,
+  "tiling": {
+    "enabled": false,
+    "tile_size": null,
+    "tile_stride": null
+  },
+  "patchcore_layers": [
+    "layer2"
+  ],
+  "patchcore_coreset_ratio": 0.01,
+  "patchcore_num_neighbors": 9,
+  "patchcore_precision": "float16",
+  "score_mode": "raw",
+  "score_aggregation": "local-contrast",
+  "score_percentile": 99.95,
+  "score_topk_percent": 0.02,
+  "score_local_sigma": 15.0,
+  "roi_mode": "foreground",
+  "calibration_path": "calibration_inputs_patchcore_768_roi",
+  "calibrated_threshold": 4.430493354797363,
+  "calibration_result": {
+    "threshold": 4.430493354797363,
+    "precision": 0.5555555555555556,
+    "recall": 0.8333333333333334,
+    "f1": 0.6666666666666667,
+    "accuracy": 0.5833333333333334,
+    "tp": 5,
+    "fp": 4,
+    "tn": 2,
+    "fn": 1
+  },
+  "heatmap_normalization": "per-image",
+  "global_anomaly_map_min": 1.982421875,
+  "global_anomaly_map_max": 35.0,
+  "num_predictions": 15,
+  "csv": "demo_outputs_patchcore_localcontrast_v2/predictions.csv",
+  "report_html": "demo_outputs_patchcore_localcontrast_v2/report.html"
+}
