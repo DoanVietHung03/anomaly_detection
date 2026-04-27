@@ -486,7 +486,7 @@ def main() -> None:
     )
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
 
-    precision_flag = "16-mixed" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
+    precision_flag = "16-true" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
 
     engine = engine_cls(
         callbacks=callbacks,
