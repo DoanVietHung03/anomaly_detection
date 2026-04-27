@@ -251,23 +251,6 @@ def build_tiling_callbacks(
     ]
 
 
-def align_patchcore_memory_bank_dtype(model: Any, precision: str) -> Any:
-    """Keep PatchCore input casting aligned with the backbone dtype."""
-    patchcore_model = getattr(model, "model", None)
-    memory_bank = getattr(patchcore_model, "memory_bank", None)
-    if memory_bank is None:
-        return model
-
-    try:
-        import torch
-    except Exception:
-        return model
-
-    dtype = torch.float16 if precision == "float16" else torch.float32
-    patchcore_model.memory_bank = memory_bank.to(dtype=dtype)
-    return model
-
-
 def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if model_name == "patchcore":
@@ -279,7 +262,7 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
             precision=DEFAULT_PATCHCORE_PRECISION,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
-        return align_patchcore_memory_bank_dtype(model, DEFAULT_PATCHCORE_PRECISION)
+        return model
     if model_name == "efficientad":
         return efficientad_cls(
             pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
@@ -310,7 +293,7 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficien
             precision=args.patchcore_precision,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
-        return align_patchcore_memory_bank_dtype(model, args.patchcore_precision)
+        return model
     return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
 
 
@@ -503,6 +486,8 @@ def main() -> None:
     )
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
 
+    precision_flag = "16-mixed" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
+
     engine = engine_cls(
         callbacks=callbacks,
         default_root_dir=str(args.results_dir),
@@ -510,6 +495,7 @@ def main() -> None:
         accelerator=args.accelerator,
         devices=args.devices,
         logger=csv_logger,
+        precision=precision_flag,
     )
 
     print("=" * 80)
