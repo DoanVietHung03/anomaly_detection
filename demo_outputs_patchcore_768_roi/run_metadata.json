@@ -1,0 +1,46 @@
+{
+  "checkpoint": "/home/hsv/hungdv/anomaly_detection/runs_patchcore_768_roi/Patchcore/SafeMVTecAD2/can/v0/weights/lightning/model.ckpt",
+  "input_path": "/home/hsv/hungdv/anomaly_detection/demo_inputs_patchcore_768_roi",
+  "dataset_root": "/home/hsv/hungdv/anomaly_detection/can",
+  "category": "can",
+  "test_type": "public",
+  "model": "patchcore",
+  "image_size": "640x1280",
+  "image_height": 640,
+  "image_width": 1280,
+  "tiling": {
+    "enabled": false,
+    "tile_size": null,
+    "tile_stride": null
+  },
+  "patchcore_layers": [
+    "layer2"
+  ],
+  "patchcore_coreset_ratio": 0.01,
+  "patchcore_num_neighbors": 9,
+  "patchcore_precision": "float16",
+  "score_mode": "raw",
+  "score_aggregation": "topk-mean",
+  "score_percentile": 99.95,
+  "score_topk_percent": 0.05,
+  "roi_mode": "foreground",
+  "calibration_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs_patchcore_768_roi",
+  "calibrated_threshold": 26.06721305847168,
+  "calibration_result": {
+    "threshold": 26.06721305847168,
+    "precision": 0.5,
+    "recall": 1.0,
+    "f1": 0.6666666666666666,
+    "accuracy": 0.5,
+    "tp": 6,
+    "fp": 6,
+    "tn": 0,
+    "fn": 0
+  },
+  "heatmap_normalization": "per-image",
+  "global_anomaly_map_min": 1.982421875,
+  "global_anomaly_map_max": 35.0,
+  "num_predictions": 15,
+  "csv": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore_768_roi/predictions.csv",
+  "report_html": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore_768_roi/report.html"
+}

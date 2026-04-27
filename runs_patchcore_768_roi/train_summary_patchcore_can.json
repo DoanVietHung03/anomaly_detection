@@ -1,0 +1,63 @@
+{
+  "dataset_root": "/home/hsv/hungdv/anomaly_detection/can",
+  "category": "can",
+  "model": "patchcore",
+  "epochs": 1,
+  "image_size": "640x1280",
+  "image_height": 640,
+  "image_width": 1280,
+  "tiling": {
+    "enabled": false,
+    "tile_size": null,
+    "tile_stride": null
+  },
+  "patchcore_layers": [
+    "layer2"
+  ],
+  "patchcore_coreset_ratio": 0.01,
+  "patchcore_num_neighbors": 9,
+  "patchcore_precision": "float16",
+  "train_batch_size": 1,
+  "eval_batch_size": 1,
+  "num_workers": 4,
+  "test_type": "public",
+  "test_variant": "regular",
+  "dataset_variant_summary": {
+    "train_good": {
+      "regular": 412
+    },
+    "validation_good": {
+      "regular": 46
+    },
+    "validation_bad": {},
+    "test_public_good": {
+      "overexposed": 12,
+      "regular": 12,
+      "shift_1": 12,
+      "shift_2": 12,
+      "shift_3": 12,
+      "underexposed": 12
+    },
+    "test_public_bad": {
+      "overexposed": 15,
+      "regular": 15,
+      "shift_1": 15,
+      "shift_2": 15,
+      "shift_3": 15,
+      "underexposed": 15
+    }
+  },
+  "accelerator": "gpu",
+  "devices": "1",
+  "seed": 42,
+  "best_checkpoint": "/home/hsv/hungdv/anomaly_detection/runs_patchcore_768_roi/Patchcore/SafeMVTecAD2/can/v0/weights/lightning/model.ckpt",
+  "metrics_csv": "/home/hsv/hungdv/anomaly_detection/runs_patchcore_768_roi/logs/patchcore_can/version_0/metrics.csv",
+  "test_results": [
+    {
+      "image_AUROC": 0.6722222566604614,
+      "image_F1Score": 0.0,
+      "pixel_AUROC": 0.9218173623085022,
+      "pixel_F1Score": 0.0
+    }
+  ]
+}

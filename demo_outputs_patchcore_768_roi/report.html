@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anomaly Demo Report</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #f5f5f5; color: #222; }
+    h1 { margin-bottom: 8px; }
+    .summary { margin-bottom: 24px; }
+    .card { background: white; border-radius: 12px; padding: 16px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+    .meta { margin-bottom: 12px; line-height: 1.6; }
+    .grid { display: grid; grid-template-columns: repeat(5, minmax(180px, 1fr)); gap: 12px; }
+    img { width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+    p { margin: 0 0 8px 0; font-weight: 600; }
+    @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Anomaly Detection Demo Report</h1>
+  <div class="summary">
+    <div><b>Total samples:</b> 15</div>
+  </div>
+  <div class="card">
+              <div class="meta">
+                <div><b>File:</b> 000_bad_000_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 31.433273</div>
+                <div><b>Model score:</b> 33.468750</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0000_000_bad_000_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0000_000_bad_000_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0000_000_bad_000_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0000_000_bad_000_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0000_000_bad_000_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0000_000_bad_000_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 001_bad_003_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 32.960564</div>
+                <div><b>Model score:</b> 35.906250</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0001_001_bad_003_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0001_001_bad_003_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0001_001_bad_003_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0001_001_bad_003_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0001_001_bad_003_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0001_001_bad_003_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 002_bad_004_regular.png</div>
+                <div><b>Pred:</b> good</div>
+                <div><b>Score:</b> 25.288025</div>
+                <div><b>Model score:</b> 27.640625</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0002_002_bad_004_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0002_002_bad_004_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0002_002_bad_004_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0002_002_bad_004_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0002_002_bad_004_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0002_002_bad_004_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 003_bad_005_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 26.898916</div>
+                <div><b>Model score:</b> 28.640625</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0003_003_bad_005_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0003_003_bad_005_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0003_003_bad_005_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0003_003_bad_005_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0003_003_bad_005_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0003_003_bad_005_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 004_bad_006_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 30.075619</div>
+                <div><b>Model score:</b> 33.312500</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0004_004_bad_006_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0004_004_bad_006_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0004_004_bad_006_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0004_004_bad_006_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0004_004_bad_006_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0004_004_bad_006_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 005_bad_007_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 26.336437</div>
+                <div><b>Model score:</b> 28.000000</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0005_005_bad_007_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0005_005_bad_007_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0005_005_bad_007_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0005_005_bad_007_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0005_005_bad_007_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0005_005_bad_007_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 006_bad_009_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 33.670021</div>
+                <div><b>Model score:</b> 36.312500</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0006_006_bad_009_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0006_006_bad_009_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0006_006_bad_009_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0006_006_bad_009_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0006_006_bad_009_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0006_006_bad_009_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 007_bad_013_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 29.829678</div>
+                <div><b>Model score:</b> 31.406250</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0007_007_bad_013_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0007_007_bad_013_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0007_007_bad_013_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0007_007_bad_013_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0007_007_bad_013_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0007_007_bad_013_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 008_bad_014_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 30.654974</div>
+                <div><b>Model score:</b> 33.000000</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> bad</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0008_008_bad_014_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0008_008_bad_014_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0008_008_bad_014_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0008_008_bad_014_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0008_008_bad_014_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0008_008_bad_014_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 000_good_002_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 29.831604</div>
+                <div><b>Model score:</b> 32.093750</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> good</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0009_000_good_002_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0009_000_good_002_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0009_000_good_002_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0009_000_good_002_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0009_000_good_002_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0009_000_good_002_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 001_good_005_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 30.329874</div>
+                <div><b>Model score:</b> 32.281250</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> good</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0010_001_good_005_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0010_001_good_005_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0010_001_good_005_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0010_001_good_005_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0010_001_good_005_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0010_001_good_005_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 002_good_006_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 29.784504</div>
+                <div><b>Model score:</b> 31.500000</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> good</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0011_002_good_006_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0011_002_good_006_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0011_002_good_006_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0011_002_good_006_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0011_002_good_006_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0011_002_good_006_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 003_good_007_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 30.043625</div>
+                <div><b>Model score:</b> 31.687500</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> good</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0012_003_good_007_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0012_003_good_007_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0012_003_good_007_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0012_003_good_007_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0012_003_good_007_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0012_003_good_007_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 004_good_008_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 26.454784</div>
+                <div><b>Model score:</b> 28.359375</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> good</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0013_004_good_008_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0013_004_good_008_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0013_004_good_008_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0013_004_good_008_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0013_004_good_008_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0013_004_good_008_regular.png"></div>
+              </div>
+            </div>
+<div class="card">
+              <div class="meta">
+                <div><b>File:</b> 005_good_009_regular.png</div>
+                <div><b>Pred:</b> bad</div>
+                <div><b>Score:</b> 26.440069</div>
+                <div><b>Model score:</b> 27.781250</div>
+                <div><b>Aggregation:</b> topk-mean / foreground</div>
+                <div><b>Threshold:</b> 26.06721305847168</div>
+                <div><b>GT guess:</b> good</div>
+              </div>
+              <div class="grid">
+                <div><p>Original</p><img src="originals/0014_005_good_009_regular.png"></div>
+                <div><p>GT Mask</p><img src="gt_masks/0014_005_good_009_regular.png"></div>
+                <div><p>GT Overlay</p><img src="gt_overlays/0014_005_good_009_regular.png"></div>
+                <div><p>ROI Mask</p><img src="roi_masks/0014_005_good_009_regular.png"></div>
+                <div><p>Heatmap</p><img src="heatmaps/0014_005_good_009_regular.png"></div>
+                <div><p>Pred Overlay</p><img src="overlays/0014_005_good_009_regular.png"></div>
+              </div>
+            </div>
+</body>
+</html>
