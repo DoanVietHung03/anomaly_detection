@@ -88,6 +88,30 @@ def parse_args() -> argparse.Namespace:
         help="Use raw model scores for calibration, or Anomalib post-processed scores.",
     )
     parser.add_argument(
+        "--roi-mode",
+        choices=["foreground", "off"],
+        default="foreground",
+        help="Restrict score aggregation to the foreground object to suppress white-background artifacts.",
+    )
+    parser.add_argument(
+        "--score-aggregation",
+        choices=["model", "max", "percentile", "topk-mean"],
+        default="topk-mean",
+        help="Image score aggregation from the anomaly map. model keeps Anomalib's original score.",
+    )
+    parser.add_argument(
+        "--score-percentile",
+        type=float,
+        default=99.95,
+        help="Percentile used when --score-aggregation percentile.",
+    )
+    parser.add_argument(
+        "--score-topk-percent",
+        type=float,
+        default=0.05,
+        help="Percentage of highest ROI pixels averaged when --score-aggregation topk-mean.",
+    )
+    parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
         default="off",
@@ -465,6 +489,72 @@ def normalize_map(anomaly_map: np.ndarray, min_v: float | None = None, max_v: fl
     return np.clip(norm * 255.0, 0, 255).astype(np.uint8)
 
 
+def foreground_mask_from_image(image_rgb: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+    """Estimate the can foreground and resize it to the anomaly-map resolution."""
+    if image_rgb.size == 0:
+        return np.ones(target_hw, dtype=bool)
+
+    hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
+    saturation = hsv[..., 1]
+    value = hsv[..., 2]
+    mask = ((saturation > 12) | (value < 245)).astype(np.uint8)
+
+    kernel_size = max(7, int(round(min(image_rgb.shape[:2]) * 0.012)))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if num_labels > 1:
+        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        mask = (labels == largest).astype(np.uint8)
+
+    target_h, target_w = target_hw
+    if mask.shape[:2] != (target_h, target_w):
+        mask = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    mask_bool = mask.astype(bool)
+    if mask_bool.mean() < 0.02:
+        return np.ones(target_hw, dtype=bool)
+    return mask_bool
+
+
+def score_mask_for_image(image_rgb: np.ndarray, anomaly_map: np.ndarray, roi_mode: str) -> np.ndarray:
+    if roi_mode == "off":
+        return np.ones(anomaly_map.shape[:2], dtype=bool)
+    return foreground_mask_from_image(image_rgb, anomaly_map.shape[:2])
+
+
+def aggregate_anomaly_score(
+    anomaly_map: np.ndarray,
+    *,
+    model_score: float,
+    roi_mask: np.ndarray,
+    aggregation: str,
+    percentile: float,
+    topk_percent: float,
+) -> float:
+    if aggregation == "model":
+        return float(model_score)
+
+    values = anomaly_map[roi_mask]
+    if values.size == 0:
+        values = anomaly_map.reshape(-1)
+
+    values = values.astype(np.float32, copy=False)
+    if aggregation == "max":
+        return float(values.max())
+    if aggregation == "percentile":
+        return float(np.percentile(values, percentile))
+    if aggregation == "topk-mean":
+        k = max(1, int(np.ceil(values.size * (topk_percent / 100.0))))
+        k = min(k, values.size)
+        top_values = np.partition(values, values.size - k)[-k:]
+        return float(top_values.mean())
+    raise ValueError(f"Unknown score aggregation: {aggregation}")
+
+
 def make_heatmap(gray_map: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
     heatmap = cv2.applyColorMap(gray_map, cv2.COLORMAP_JET)
     heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
@@ -636,6 +726,10 @@ def predict_path(
     model: Any,
     ckpt_path: Path,
     image_size: tuple[int, int],
+    roi_mode: str,
+    score_aggregation: str,
+    score_percentile: float,
+    score_topk_percent: float,
 ) -> list[dict[str, Any]]:
     dataset = predict_dataset_cls(path=path, image_size=image_size)
     predictions = engine.predict(
@@ -663,9 +757,18 @@ def predict_path(
         else:
             raise SystemExit(f"Could not load source image for prediction {idx}: {image_path}")
 
-        pred_score = scalar_float(getattr(pred, "pred_score", None))
+        model_pred_score = scalar_float(getattr(pred, "pred_score", None))
         pred_label = optional_int(getattr(pred, "pred_label", None))
         anomaly_map = tensor_to_numpy(anomaly_map_like).astype(np.float32)
+        roi_mask = score_mask_for_image(image_rgb, anomaly_map, roi_mode)
+        pred_score = aggregate_anomaly_score(
+            anomaly_map,
+            model_score=model_pred_score,
+            roi_mask=roi_mask,
+            aggregation=score_aggregation,
+            percentile=score_percentile,
+            topk_percent=score_topk_percent,
+        )
         prepared.append(
             {
                 "index": idx,
@@ -673,9 +776,14 @@ def predict_path(
                 "pred_label": pred_label,
                 "pred_score": pred_score,
                 "raw_pred_score": pred_score,
+                "model_pred_score": model_pred_score,
                 "anomaly_map": anomaly_map,
                 "anomaly_map_min": float(anomaly_map.min()),
                 "anomaly_map_max": float(anomaly_map.max()),
+                "roi_mask": roi_mask,
+                "roi_coverage": float(roi_mask.mean()),
+                "score_aggregation": score_aggregation,
+                "roi_mode": roi_mode,
                 "image_rgb": image_rgb,
             },
         )
@@ -692,6 +800,8 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
                 <div><b>File:</b> {html.escape(row['image_name'])}</div>
                 <div><b>Pred:</b> {html.escape(str(row.get('pred_label_name', row['pred_label'])))}</div>
                 <div><b>Score:</b> {row['pred_score']:.6f}</div>
+                <div><b>Model score:</b> {float(row.get('model_pred_score', row['pred_score'])):.6f}</div>
+                <div><b>Aggregation:</b> {html.escape(str(row.get('score_aggregation', 'model')))} / {html.escape(str(row.get('roi_mode', 'off')))}</div>
                 <div><b>Threshold:</b> {html.escape(str(row.get('calibrated_threshold') or 'model/default'))}</div>
                 <div><b>GT guess:</b> {html.escape(str(row.get('gt_label', 'unknown')))}</div>
               </div>
@@ -699,6 +809,7 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
                 <div><p>Original</p><img src=\"{html.escape(row['original_rel'])}\"></div>
                 <div><p>GT Mask</p><img src=\"{html.escape(row['gt_mask_rel'])}\"></div>
                 <div><p>GT Overlay</p><img src=\"{html.escape(row['gt_overlay_rel'])}\"></div>
+                <div><p>ROI Mask</p><img src=\"{html.escape(row['roi_mask_rel'])}\"></div>
                 <div><p>Heatmap</p><img src=\"{html.escape(row['heatmap_rel'])}\"></div>
                 <div><p>Pred Overlay</p><img src=\"{html.escape(row['overlay_rel'])}\"></div>
               </div>
@@ -767,15 +878,21 @@ def main() -> None:
         raise SystemExit(f"Calibration path not found: {args.calibration_path}")
     if args.calibration_threshold is not None and not np.isfinite(args.calibration_threshold):
         raise SystemExit("--calibration-threshold must be finite.")
+    if not (0.0 < args.score_percentile <= 100.0):
+        raise SystemExit("--score-percentile must be in the range (0, 100].")
+    if not (0.0 < args.score_topk_percent <= 100.0):
+        raise SystemExit("--score-topk-percent must be in the range (0, 100].")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     original_dir = args.output_dir / "originals"
     heatmap_dir = args.output_dir / "heatmaps"
     overlay_dir = args.output_dir / "overlays"
     rawmap_dir = args.output_dir / "raw_maps"
+    raw_float_dir = args.output_dir / "raw_float_maps"
+    roi_mask_dir = args.output_dir / "roi_masks"
     gt_mask_dir = args.output_dir / "gt_masks"
     gt_overlay_dir = args.output_dir / "gt_overlays"
-    for d in (original_dir, heatmap_dir, overlay_dir, rawmap_dir, gt_mask_dir, gt_overlay_dir):
+    for d in (original_dir, heatmap_dir, overlay_dir, rawmap_dir, raw_float_dir, roi_mask_dir, gt_mask_dir, gt_overlay_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
@@ -793,6 +910,10 @@ def main() -> None:
             model=model,
             ckpt_path=ckpt_path,
             image_size=image_size,
+            roi_mode=args.roi_mode,
+            score_aggregation=args.score_aggregation,
+            score_percentile=args.score_percentile,
+            score_topk_percent=args.score_topk_percent,
         )
         calibration_result = best_f1_threshold(calibration_scores(calibration_predictions))
         if calibration_result is not None:
@@ -809,6 +930,10 @@ def main() -> None:
         model=model,
         ckpt_path=ckpt_path,
         image_size=image_size,
+        roi_mode=args.roi_mode,
+        score_aggregation=args.score_aggregation,
+        score_percentile=args.score_percentile,
+        score_topk_percent=args.score_topk_percent,
     )
 
     map_mins = [float(item["anomaly_map_min"]) for item in prepared_predictions]
@@ -825,6 +950,7 @@ def main() -> None:
         model_pred_label = item["pred_label"]
         pred_score = float(item["pred_score"])
         anomaly_map = item["anomaly_map"]
+        roi_mask = item["roi_mask"]
 
         if args.heatmap_normalization == "global":
             gray_map = normalize_map(anomaly_map, global_map_min, global_map_max)
@@ -848,6 +974,8 @@ def main() -> None:
         heatmap_path = heatmap_dir / f"{stem}.png"
         overlay_path = overlay_dir / f"{stem}.png"
         rawmap_path = rawmap_dir / f"{stem}.png"
+        raw_float_path = raw_float_dir / f"{stem}.npy"
+        roi_mask_path = roi_mask_dir / f"{stem}.png"
         gt_mask_path = gt_mask_dir / f"{stem}.png"
         gt_overlay_path = gt_overlay_dir / f"{stem}.png"
 
@@ -856,6 +984,8 @@ def main() -> None:
         save_image(overlay_path, overlay_rgb)
         save_image(gt_overlay_path, gt_overlay_rgb)
         Image.fromarray(gray_map).save(rawmap_path)
+        np.save(raw_float_path, anomaly_map.astype(np.float32, copy=False))
+        Image.fromarray((roi_mask.astype(np.uint8) * 255)).save(roi_mask_path)
         Image.fromarray(gt_mask).save(gt_mask_path)
 
         if calibrated_threshold is not None:
@@ -876,8 +1006,12 @@ def main() -> None:
             "anomalib_pred_label": "" if model_pred_label is None else int(model_pred_label),
             "pred_score": pred_score,
             "raw_pred_score": item["raw_pred_score"],
+            "model_pred_score": item["model_pred_score"],
             "calibrated_threshold": "" if calibrated_threshold is None else calibrated_threshold,
             "score_mode": args.score_mode,
+            "score_aggregation": item["score_aggregation"],
+            "roi_mode": item["roi_mode"],
+            "roi_coverage": item["roi_coverage"],
             "gt_label": gt_label,
             "correct": correct,
             "anomaly_map_min": item["anomaly_map_min"],
@@ -889,6 +1023,8 @@ def main() -> None:
             "heatmap_rel": heatmap_path.relative_to(args.output_dir).as_posix(),
             "overlay_rel": overlay_path.relative_to(args.output_dir).as_posix(),
             "raw_map_rel": rawmap_path.relative_to(args.output_dir).as_posix(),
+            "raw_float_map_rel": raw_float_path.relative_to(args.output_dir).as_posix(),
+            "roi_mask_rel": roi_mask_path.relative_to(args.output_dir).as_posix(),
         }
         rows.append(row)
 
@@ -917,6 +1053,10 @@ def main() -> None:
         "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
         "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
         "score_mode": args.score_mode,
+        "score_aggregation": args.score_aggregation,
+        "score_percentile": args.score_percentile,
+        "score_topk_percent": args.score_topk_percent,
+        "roi_mode": args.roi_mode,
         "calibration_path": str(args.calibration_path) if args.calibration_path else None,
         "calibrated_threshold": calibrated_threshold,
         "calibration_result": calibration_result,
@@ -939,6 +1079,7 @@ def main() -> None:
         print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
         print(f"[INFO] Precision  : {args.patchcore_precision}")
     print(f"[INFO] Score mode : {args.score_mode}")
+    print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
     print(f"[INFO] Threshold  : {calibrated_threshold if calibrated_threshold is not None else 'model/default'}")
     print(f"[INFO] CSV        : {csv_path}")
     print(f"[INFO] HTML       : {html_path}")

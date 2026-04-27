@@ -41,14 +41,20 @@ class PredictionRow:
     pred_label: int | None
     pred_score: float
     raw_pred_score: float | None = None
+    model_pred_score: float | None = None
     calibrated_threshold: float | None = None
     score_mode: str | None = None
+    score_aggregation: str | None = None
+    roi_mode: str | None = None
+    roi_coverage: float | None = None
     original_rel: str | None = None
     gt_mask_rel: str | None = None
     gt_overlay_rel: str | None = None
     heatmap_rel: str | None = None
     overlay_rel: str | None = None
     raw_map_rel: str | None = None
+    raw_float_map_rel: str | None = None
+    roi_mask_rel: str | None = None
 
 
 @dataclass
@@ -244,14 +250,20 @@ def read_predictions(path: Path) -> list[PredictionRow]:
                     pred_label=safe_int(raw.get("pred_label")),
                     pred_score=score,
                     raw_pred_score=safe_float(raw.get("raw_pred_score")),
+                    model_pred_score=safe_float(raw.get("model_pred_score")),
                     calibrated_threshold=safe_float(raw.get("calibrated_threshold")),
                     score_mode=raw.get("score_mode") or None,
+                    score_aggregation=raw.get("score_aggregation") or None,
+                    roi_mode=raw.get("roi_mode") or None,
+                    roi_coverage=safe_float(raw.get("roi_coverage")),
                     original_rel=raw.get("original_rel") or None,
                     gt_mask_rel=raw.get("gt_mask_rel") or None,
                     gt_overlay_rel=raw.get("gt_overlay_rel") or None,
                     heatmap_rel=raw.get("heatmap_rel") or None,
                     overlay_rel=raw.get("overlay_rel") or None,
                     raw_map_rel=raw.get("raw_map_rel") or None,
+                    raw_float_map_rel=raw.get("raw_float_map_rel") or None,
+                    roi_mask_rel=raw.get("roi_mask_rel") or None,
                 ),
             )
     return rows
@@ -774,15 +786,17 @@ def render_image_gallery(record: ModelArtifacts, output_dir: Path, max_items: in
         original = prediction_artifact_href(record, row, "original_rel", output_dir)
         gt_mask = prediction_artifact_href(record, row, "gt_mask_rel", output_dir)
         gt_overlay = prediction_artifact_href(record, row, "gt_overlay_rel", output_dir)
+        roi_mask = prediction_artifact_href(record, row, "roi_mask_rel", output_dir)
         heatmap = prediction_artifact_href(record, row, "heatmap_rel", output_dir)
         overlay = prediction_artifact_href(record, row, "overlay_rel", output_dir)
-        if not any((original, gt_mask, gt_overlay, heatmap, overlay)):
+        if not any((original, gt_mask, gt_overlay, roi_mask, heatmap, overlay)):
             continue
         image_blocks = []
         for label, href in (
             ("Original", original),
             ("GT Mask", gt_mask),
             ("GT Overlay", gt_overlay),
+            ("ROI Mask", roi_mask),
             ("Heatmap", heatmap),
             ("Pred Overlay", overlay),
         ):
@@ -797,6 +811,8 @@ def render_image_gallery(record: ModelArtifacts, output_dir: Path, max_items: in
             f"<strong>{html.escape(row.image_name)}</strong>"
             f"<span>GT {html.escape(str(row.gt_label or 'unknown'))} | "
             f"Pred {html.escape(prediction_label(row.pred_label))} | Score {row.pred_score:.4f}"
+            f"{' | Model ' + format_number(row.model_pred_score) if row.model_pred_score is not None else ''}"
+            f"{' | ' + html.escape(row.score_aggregation) + '/' + html.escape(row.roi_mode or 'off') if row.score_aggregation else ''}"
             f"{' | Threshold ' + format_number(row.calibrated_threshold) if row.calibrated_threshold is not None else ''}</span>"
             "</div>"
             f"<div class=\"sample-images\">{''.join(image_blocks)}</div>"

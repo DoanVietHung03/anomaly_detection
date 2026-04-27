@@ -1,2 +1,0 @@
-epoch,image_AUROC,image_F1Score,pixel_AUROC,pixel_F1Score,step
-1,0.5250000357627869,0.125,0.9053460359573364,0.0,412
