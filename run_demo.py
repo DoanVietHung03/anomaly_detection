@@ -14,7 +14,12 @@ from pathlib import Path
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
-DEFAULT_IMAGE_SIZE = (512, 1024)
+DEFAULT_IMAGE_SIZE = (512, 512)
+DEFAULT_TILING = "auto"
+DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
+DEFAULT_PATCHCORE_CORESET_RATIO = 0.1
+DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
+DEFAULT_PATCHCORE_PRECISION = "float16"
 REQUIRED_IMPORTS = {
     "anomalib": "Anomalib",
     "cv2": "OpenCV",
@@ -55,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-calibration-good", type=int, default=4, help="Number of good calibration images to sample.")
     parser.add_argument("--num-calibration-bad", type=int, default=4, help="Number of bad calibration images to sample.")
     parser.add_argument("--train-batch-size", type=int, default=None, help="Training batch size.")
-    parser.add_argument("--eval-batch-size", type=int, default=8, help="Eval/test batch size.")
+    parser.add_argument("--eval-batch-size", type=int, default=1, help="Eval/test batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
     parser.add_argument(
         "--image-size",
@@ -64,34 +69,39 @@ def parse_args() -> argparse.Namespace:
         help="Square training/inference image size. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="Training/inference image height. Defaults to 512.")
-    parser.add_argument("--image-width", type=int, default=None, help="Training/inference image width. Defaults to 1024.")
+    parser.add_argument("--image-width", type=int, default=None, help="Training/inference image width. Defaults to 512.")
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
-        default="off",
-        help="Enable tiled PatchCore processing. Disabled by default to keep VRAM predictable.",
+        default=DEFAULT_TILING,
+        help="Enable tiled PatchCore processing. auto enables it for PatchCore.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument("--tile-stride", type=int, default=None, help="PatchCore tile stride. Defaults to half tile size.")
     parser.add_argument(
         "--patchcore-layers",
         nargs="+",
-        default=["layer2"],
+        default=list(DEFAULT_PATCHCORE_LAYERS),
         choices=["layer1", "layer2", "layer3", "layer4"],
-        help="PatchCore feature layers. layer2 is the A4000-safe default for tiny defects.",
+        help="PatchCore feature layers. layer2+layer3 balances fine texture and object context.",
     )
     parser.add_argument(
         "--patchcore-coreset-ratio",
         type=float,
-        default=0.02,
-        help="PatchCore coreset sampling ratio. Lower values reduce memory and KNN cost.",
+        default=DEFAULT_PATCHCORE_CORESET_RATIO,
+        help="PatchCore coreset sampling ratio. Use 0.05 if 0.1 exceeds GPU memory.",
     )
-    parser.add_argument("--patchcore-num-neighbors", type=int, default=9, help="PatchCore nearest-neighbor count.")
+    parser.add_argument(
+        "--patchcore-num-neighbors",
+        type=int,
+        default=DEFAULT_PATCHCORE_NUM_NEIGHBORS,
+        help="PatchCore nearest-neighbor count.",
+    )
     parser.add_argument(
         "--patchcore-precision",
         choices=["float16", "float32"],
-        default="float16",
-        help="PatchCore compute precision. float16 is recommended for 16 GB GPUs.",
+        default=DEFAULT_PATCHCORE_PRECISION,
+        help="PatchCore compute precision. float16 is recommended for RTX A4000 16 GB.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
     parser.add_argument(
@@ -291,7 +301,7 @@ def main() -> None:
     output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}"), project_root)
     image_size = resolve_image_size(args)
     epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
-    default_batch_size = 1 if args.model == "efficientad" else 8
+    default_batch_size = 1
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
     demo_variants = args.demo_variants if args.demo_variants is not None else args.test_variant
 

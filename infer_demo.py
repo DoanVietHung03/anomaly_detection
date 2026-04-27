@@ -16,7 +16,12 @@ import cv2
 import numpy as np
 from PIL import Image
 
-DEFAULT_IMAGE_SIZE = (512, 1024)
+DEFAULT_IMAGE_SIZE = (512, 512)
+DEFAULT_TILING = "auto"
+DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
+DEFAULT_PATCHCORE_CORESET_RATIO = 0.1
+DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
+DEFAULT_PATCHCORE_PRECISION = "float16"
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         help="Square PredictDataset image size. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="PredictDataset image height. Defaults to 512.")
-    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 1024.")
+    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 512.")
     parser.add_argument(
         "--calibration-path",
         type=Path,
@@ -120,8 +125,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
-        default="off",
-        help="Enable tiled PatchCore inference. Disabled by default to keep VRAM predictable.",
+        default=DEFAULT_TILING,
+        help="Enable tiled PatchCore inference. auto enables it for PatchCore.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument(
@@ -133,21 +138,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--patchcore-layers",
         nargs="+",
-        default=["layer2"],
+        default=list(DEFAULT_PATCHCORE_LAYERS),
         choices=["layer1", "layer2", "layer3", "layer4"],
         help="PatchCore feature layers. Must match the trained checkpoint.",
     )
     parser.add_argument(
         "--patchcore-coreset-ratio",
         type=float,
-        default=0.02,
+        default=DEFAULT_PATCHCORE_CORESET_RATIO,
         help="PatchCore coreset sampling ratio. Must match the trained checkpoint.",
     )
-    parser.add_argument("--patchcore-num-neighbors", type=int, default=9, help="PatchCore nearest-neighbor count.")
+    parser.add_argument(
+        "--patchcore-num-neighbors",
+        type=int,
+        default=DEFAULT_PATCHCORE_NUM_NEIGHBORS,
+        help="PatchCore nearest-neighbor count.",
+    )
     parser.add_argument(
         "--patchcore-precision",
         choices=["float16", "float32"],
-        default="float16",
+        default=DEFAULT_PATCHCORE_PRECISION,
         help="PatchCore compute precision. Must match the trained checkpoint.",
     )
     parser.add_argument(
@@ -279,9 +289,10 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
     if model_name == "patchcore":
         return patchcore_cls(
             backbone="wide_resnet50_2",
-            layers=("layer2", "layer3"),
-            coreset_sampling_ratio=0.1,
-            num_neighbors=9,
+            layers=DEFAULT_PATCHCORE_LAYERS,
+            coreset_sampling_ratio=DEFAULT_PATCHCORE_CORESET_RATIO,
+            num_neighbors=DEFAULT_PATCHCORE_NUM_NEIGHBORS,
+            precision=DEFAULT_PATCHCORE_PRECISION,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     if model_name == "efficientad":

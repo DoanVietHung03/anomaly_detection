@@ -28,7 +28,7 @@ mvtec_can_demo/
 Khuyến nghị Python 3.10 - 3.12.
 
 ### Cài thư viện
-Project này mặc định dùng NVIDIA GPU. Máy đang được cấu hình theo GTX 1650 Ti / driver CUDA 12.4, nên `requirements.txt` dùng `anomalib[cu118]` để tương thích rộng với driver hiện tại.
+Project này mặc định dùng NVIDIA GPU. Profile PatchCore mặc định đang nhắm tới RTX A4000 16 GB VRAM: `image-size 512`, `layer2 layer3`, `coreset 0.1`, `float16`, và `tiling auto`.
 
 Tạo môi trường ảo nếu chưa có:
 
@@ -81,8 +81,13 @@ python train_demo.py \
   --model patchcore \
   --results-dir ./runs_patchcore \
   --epochs 1 \
-  --train-batch-size 8 \
-  --eval-batch-size 8 \
+  --image-size 512 \
+  --tiling auto \
+  --patchcore-layers layer2 layer3 \
+  --patchcore-coreset-ratio 0.1 \
+  --patchcore-precision float16 \
+  --train-batch-size 1 \
+  --eval-batch-size 1 \
   --accelerator gpu \
   --devices 1
 ```
@@ -111,13 +116,13 @@ Trong bộ `can` này, `train/good` và `validation/good` chỉ có ảnh `regul
 Để kiểm tra cùng điều kiện chụp trước:
 
 ```powershell
-.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_regular --epochs 1 --image-size 384 --test-variant regular
+.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_regular --epochs 1 --image-size 512 --patchcore-layers layer2 layer3 --patchcore-coreset-ratio 0.1 --patchcore-precision float16 --tiling auto --test-variant regular
 ```
 
 Để đo toàn bộ public split:
 
 ```powershell
-.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_all --epochs 1 --image-size 384 --test-variant all
+.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_all --epochs 1 --image-size 512 --patchcore-layers layer2 layer3 --patchcore-coreset-ratio 0.1 --patchcore-precision float16 --tiling auto --test-variant all
 ```
 
 ## 5) Chuẩn bị ảnh input demo

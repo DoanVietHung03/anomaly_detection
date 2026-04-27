@@ -26,7 +26,12 @@ except Exception:  # pragma: no cover - import_dependencies handles the runtime 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
-DEFAULT_IMAGE_SIZE = (512, 1024)
+DEFAULT_IMAGE_SIZE = (512, 512)
+DEFAULT_TILING = "auto"
+DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
+DEFAULT_PATCHCORE_CORESET_RATIO = 0.1
+DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
+DEFAULT_PATCHCORE_PRECISION = "float16"
 
 
 class SafeMVTecAD2(_MVTecAD2Base):
@@ -72,8 +77,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--results-dir", type=Path, default=Path("./runs"), help="Output directory.")
     parser.add_argument("--epochs", type=int, default=30, help="Training epochs.")
-    parser.add_argument("--train-batch-size", type=int, default=4, help="Override train batch size.")
-    parser.add_argument("--eval-batch-size", type=int, default=4, help="Eval/test batch size.")
+    parser.add_argument("--train-batch-size", type=int, default=1, help="Override train batch size.")
+    parser.add_argument("--eval-batch-size", type=int, default=1, help="Eval/test batch size.")
     parser.add_argument(
         "--image-size",
         type=int,
@@ -81,13 +86,13 @@ def parse_args() -> argparse.Namespace:
         help="Square image size for model preprocessing. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="Model input height. Defaults to 512.")
-    parser.add_argument("--image-width", type=int, default=None, help="Model input width. Defaults to 1024.")
+    parser.add_argument("--image-width", type=int, default=None, help="Model input width. Defaults to 512.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
-        default="off",
-        help="Enable tiled PatchCore processing. Disabled by default to keep VRAM predictable.",
+        default=DEFAULT_TILING,
+        help="Enable tiled PatchCore processing. auto enables it for PatchCore.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument(
@@ -99,22 +104,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--patchcore-layers",
         nargs="+",
-        default=["layer2"],
+        default=list(DEFAULT_PATCHCORE_LAYERS),
         choices=["layer1", "layer2", "layer3", "layer4"],
-        help="PatchCore feature layers. layer2 is the A4000-safe default for tiny defects.",
+        help="PatchCore feature layers. layer2+layer3 balances fine texture and object context.",
     )
     parser.add_argument(
         "--patchcore-coreset-ratio",
         type=float,
-        default=0.02,
-        help="PatchCore coreset sampling ratio. Lower values reduce memory and KNN cost.",
+        default=DEFAULT_PATCHCORE_CORESET_RATIO,
+        help="PatchCore coreset sampling ratio. Use 0.05 if 0.1 exceeds GPU memory.",
     )
-    parser.add_argument("--patchcore-num-neighbors", type=int, default=9, help="PatchCore nearest-neighbor count.")
+    parser.add_argument(
+        "--patchcore-num-neighbors",
+        type=int,
+        default=DEFAULT_PATCHCORE_NUM_NEIGHBORS,
+        help="PatchCore nearest-neighbor count.",
+    )
     parser.add_argument(
         "--patchcore-precision",
         choices=["float16", "float32"],
-        default="float16",
-        help="PatchCore compute precision. float16 is recommended for 16 GB GPUs.",
+        default=DEFAULT_PATCHCORE_PRECISION,
+        help="PatchCore compute precision. float16 is recommended for RTX A4000 16 GB.",
     )
     parser.add_argument(
         "--test-type",
@@ -241,16 +251,35 @@ def build_tiling_callbacks(
     ]
 
 
+def align_patchcore_memory_bank_dtype(model: Any, precision: str) -> Any:
+    """Keep PatchCore input casting aligned with the backbone dtype."""
+    patchcore_model = getattr(model, "model", None)
+    memory_bank = getattr(patchcore_model, "memory_bank", None)
+    if memory_bank is None:
+        return model
+
+    try:
+        import torch
+    except Exception:
+        return model
+
+    dtype = torch.float16 if precision == "float16" else torch.float32
+    patchcore_model.memory_bank = memory_bank.to(dtype=dtype)
+    return model
+
+
 def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if model_name == "patchcore":
-        return patchcore_cls(
+        model = patchcore_cls(
             backbone="wide_resnet50_2",
-            layers=("layer2", "layer3"),
-            coreset_sampling_ratio=0.1,
-            num_neighbors=9,
+            layers=DEFAULT_PATCHCORE_LAYERS,
+            coreset_sampling_ratio=DEFAULT_PATCHCORE_CORESET_RATIO,
+            num_neighbors=DEFAULT_PATCHCORE_NUM_NEIGHBORS,
+            precision=DEFAULT_PATCHCORE_PRECISION,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
+        return align_patchcore_memory_bank_dtype(model, DEFAULT_PATCHCORE_PRECISION)
     if model_name == "efficientad":
         return efficientad_cls(
             pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
@@ -273,7 +302,7 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficien
     pre_processor_size = image_size
     if args.model == "patchcore":
         layers = validate_patchcore_args(args)
-        return patchcore_cls(
+        model = patchcore_cls(
             backbone="wide_resnet50_2",
             layers=layers,
             coreset_sampling_ratio=args.patchcore_coreset_ratio,
@@ -281,6 +310,7 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficien
             precision=args.patchcore_precision,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
+        return align_patchcore_memory_bank_dtype(model, args.patchcore_precision)
     return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
 
 
@@ -386,6 +416,21 @@ def print_threshold_warning(summary: dict[str, dict[str, int]]) -> None:
         print("[WARN] Use infer_demo.py --calibration-path with both good and bad images for calibrated labels.")
 
 
+def print_patchcore_profile_warnings(args: argparse.Namespace, image_size: tuple[int, int], tiling_config: dict[str, Any]) -> None:
+    if args.model != "patchcore":
+        return
+
+    layers = set(validate_patchcore_args(args))
+    if "layer3" not in layers:
+        print("[WARN] PatchCore is running without layer3; image-level scores may miss broader object context.")
+    if args.patchcore_coreset_ratio < 0.05:
+        print("[WARN] PatchCore coreset ratio is below 0.05; normal edge cases may be under-represented.")
+    if image_size[0] != image_size[1]:
+        print("[WARN] Non-square PatchCore input can introduce resize distortion. Prefer a square --image-size such as 512 or 768.")
+    if not tiling_config["enabled"] and max(image_size) / min(image_size) >= 1.5:
+        print("[WARN] Tiling is disabled on a high-aspect-ratio input. Use --tiling auto or --tiling on for PatchCore.")
+
+
 def make_safe_mvtec_ad2_cls(mvtec_ad2_cls: Any) -> Any:
     if not issubclass(SafeMVTecAD2, mvtec_ad2_cls):
         raise SystemExit("SafeMVTecAD2 base class mismatch. Restart the Python process and try again.")
@@ -484,6 +529,7 @@ def main() -> None:
     print(f"[INFO] variants    : {dataset_variant_summary}")
     print_domain_shift_warning(dataset_variant_summary, selected_test_variants)
     print_threshold_warning(dataset_variant_summary)
+    print_patchcore_profile_warnings(args, image_size, tiling_config)
     print("=" * 80)
 
     engine.fit(model=model, datamodule=datamodule)
