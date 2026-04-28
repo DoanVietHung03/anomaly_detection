@@ -1,10 +1,9 @@
 backbone: wide_resnet50_2
-coreset_sampling_ratio: 0.05
+coreset_sampling_ratio: 0.005
 evaluator: true
 layers: !!python/tuple
-- layer2
-- layer3
-num_neighbors: 9
+- layer1
+num_neighbors: 3
 post_processor: true
 pre_processor: !!python/object:anomalib.pre_processing.pre_processor.PreProcessor
   _backward_hooks: !!python/object/apply:collections.OrderedDict
@@ -91,8 +90,8 @@ pre_processor: !!python/object:anomalib.pre_processing.pre_processor.PreProcesso
         - bilinear
         max_size: null
         size:
-        - 384
-        - 837
+        - 320
+        - 698
         training: true
       - !!python/object:torchvision.transforms.v2._misc.Normalize
         _backward_hooks: !!python/object/apply:collections.OrderedDict
@@ -194,8 +193,8 @@ pre_processor: !!python/object:anomalib.pre_processing.pre_processor.PreProcesso
         interpolation: *id001
         max_size: null
         size:
-        - 384
-        - 837
+        - 320
+        - 698
         training: true
       - !!python/object:torchvision.transforms.v2._misc.Normalize
         _backward_hooks: !!python/object/apply:collections.OrderedDict
