@@ -14,12 +14,12 @@ from pathlib import Path
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
-DEFAULT_IMAGE_SIZE = (512, 512)
+DEFAULT_IMAGE_SIZE = (512, 1116)
 DEFAULT_TILING = "auto"
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
-DEFAULT_PATCHCORE_CORESET_RATIO = 0.1
+DEFAULT_PATCHCORE_CORESET_RATIO = 0.15
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
-DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_PATCHCORE_PRECISION = "float32"
 REQUIRED_IMPORTS = {
     "anomalib": "Anomalib",
     "cv2": "OpenCV",
@@ -66,10 +66,10 @@ def parse_args() -> argparse.Namespace:
         "--image-size",
         type=int,
         default=None,
-        help="Square training/inference image size. Overridden by --image-height/--image-width.",
+        help="Optional square training/inference image size. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="Training/inference image height. Defaults to 512.")
-    parser.add_argument("--image-width", type=int, default=None, help="Training/inference image width. Defaults to 512.")
+    parser.add_argument("--image-width", type=int, default=None, help="Training/inference image width. Defaults to 1116.")
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
@@ -89,7 +89,7 @@ def parse_args() -> argparse.Namespace:
         "--patchcore-coreset-ratio",
         type=float,
         default=DEFAULT_PATCHCORE_CORESET_RATIO,
-        help="PatchCore coreset sampling ratio. Use 0.05 if 0.1 exceeds GPU memory.",
+        help="PatchCore coreset sampling ratio. Use 0.05 if 0.15 exceeds GPU memory.",
     )
     parser.add_argument(
         "--patchcore-num-neighbors",
@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
         "--patchcore-precision",
         choices=["float16", "float32"],
         default=DEFAULT_PATCHCORE_PRECISION,
-        help="PatchCore compute precision. float16 is recommended for RTX A4000 16 GB.",
+        help="PatchCore compute precision. float32 is the safer default; use float16 only if memory is tight.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
     parser.add_argument(
@@ -126,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--heatmap-normalization",
         choices=["global", "per-image"],
-        default="per-image",
+        default="global",
         help="Normalize heatmaps across the inference batch or independently per image.",
     )
     parser.add_argument(
@@ -138,8 +138,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-aggregation",
         choices=["model", "max", "percentile", "topk-mean", "local-contrast", "local-ratio"],
-        default="local-contrast",
+        default="model",
         help="Image score aggregation used by infer_demo.py.",
+    )
+    parser.add_argument(
+        "--calibration-objective",
+        choices=["balanced-f1", "f1"],
+        default="balanced-f1",
+        help="Threshold selection objective for labelled calibration images.",
     )
     parser.add_argument(
         "--score-percentile",
@@ -453,6 +459,8 @@ def main() -> None:
         str(args.score_local_sigma),
         "--heatmap-normalization",
         args.heatmap_normalization,
+        "--calibration-objective",
+        args.calibration_objective,
         "--accelerator",
         args.accelerator,
         "--devices",

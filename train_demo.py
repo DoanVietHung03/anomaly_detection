@@ -26,12 +26,12 @@ except Exception:  # pragma: no cover - import_dependencies handles the runtime 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
-DEFAULT_IMAGE_SIZE = (512, 512)
+DEFAULT_IMAGE_SIZE = (512, 1116)
 DEFAULT_TILING = "auto"
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
-DEFAULT_PATCHCORE_CORESET_RATIO = 0.1
+DEFAULT_PATCHCORE_CORESET_RATIO = 0.15
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
-DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_PATCHCORE_PRECISION = "float32"
 
 
 class SafeMVTecAD2(_MVTecAD2Base):
@@ -83,10 +83,10 @@ def parse_args() -> argparse.Namespace:
         "--image-size",
         type=int,
         default=None,
-        help="Square image size for model preprocessing. Overridden by --image-height/--image-width.",
+        help="Optional square image size for model preprocessing. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="Model input height. Defaults to 512.")
-    parser.add_argument("--image-width", type=int, default=None, help="Model input width. Defaults to 512.")
+    parser.add_argument("--image-width", type=int, default=None, help="Model input width. Defaults to 1116.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
     parser.add_argument(
         "--tiling",
@@ -112,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         "--patchcore-coreset-ratio",
         type=float,
         default=DEFAULT_PATCHCORE_CORESET_RATIO,
-        help="PatchCore coreset sampling ratio. Use 0.05 if 0.1 exceeds GPU memory.",
+        help="PatchCore coreset sampling ratio. Use 0.05 if 0.15 exceeds GPU memory.",
     )
     parser.add_argument(
         "--patchcore-num-neighbors",
@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
         "--patchcore-precision",
         choices=["float16", "float32"],
         default=DEFAULT_PATCHCORE_PRECISION,
-        help="PatchCore compute precision. float16 is recommended for RTX A4000 16 GB.",
+        help="PatchCore compute precision. float32 is the safer default; use float16 only if memory is tight.",
     )
     parser.add_argument(
         "--test-type",
@@ -396,7 +396,7 @@ def print_domain_shift_warning(summary: dict[str, dict[str, int]], selected_vari
 def print_threshold_warning(summary: dict[str, dict[str, int]]) -> None:
     if not summary.get("validation_bad"):
         print("[WARN] validation/bad is empty. Anomalib's adaptive threshold may classify everything as good.")
-        print("[WARN] Use infer_demo.py --calibration-path with both good and bad images for calibrated labels.")
+        print("[WARN] Use infer_demo.py --calibration-path with enough good and bad images for calibrated labels.")
 
 
 def print_patchcore_profile_warnings(args: argparse.Namespace, image_size: tuple[int, int], tiling_config: dict[str, Any]) -> None:
@@ -408,8 +408,8 @@ def print_patchcore_profile_warnings(args: argparse.Namespace, image_size: tuple
         print("[WARN] PatchCore is running without layer3; image-level scores may miss broader object context.")
     if args.patchcore_coreset_ratio < 0.05:
         print("[WARN] PatchCore coreset ratio is below 0.05; normal edge cases may be under-represented.")
-    if image_size[0] != image_size[1]:
-        print("[WARN] Non-square PatchCore input can introduce resize distortion. Prefer a square --image-size such as 512 or 768.")
+    if image_size[0] == image_size[1]:
+        print("[WARN] Square PatchCore input distorts the wide can images. Prefer --image-height 512 --image-width 1116.")
     if not tiling_config["enabled"] and max(image_size) / min(image_size) >= 1.5:
         print("[WARN] Tiling is disabled on a high-aspect-ratio input. Use --tiling auto or --tiling on for PatchCore.")
 

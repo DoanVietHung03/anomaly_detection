@@ -16,12 +16,12 @@ import cv2
 import numpy as np
 from PIL import Image
 
-DEFAULT_IMAGE_SIZE = (512, 512)
+DEFAULT_IMAGE_SIZE = (512, 1116)
 DEFAULT_TILING = "auto"
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
-DEFAULT_PATCHCORE_CORESET_RATIO = 0.1
+DEFAULT_PATCHCORE_CORESET_RATIO = 0.15
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
-DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_PATCHCORE_PRECISION = "float32"
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,10 +70,10 @@ def parse_args() -> argparse.Namespace:
         "--image-size",
         type=int,
         default=None,
-        help="Square PredictDataset image size. Overridden by --image-height/--image-width.",
+        help="Optional square PredictDataset image size. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="PredictDataset image height. Defaults to 512.")
-    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 512.")
+    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 1116.")
     parser.add_argument(
         "--calibration-path",
         type=Path,
@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Manual threshold to apply to prediction scores. Overrides --calibration-path.",
+    )
+    parser.add_argument(
+        "--calibration-objective",
+        choices=["balanced-f1", "f1"],
+        default="balanced-f1",
+        help="Threshold selection objective for labelled calibration images.",
     )
     parser.add_argument(
         "--score-mode",
@@ -101,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-aggregation",
         choices=["model", "max", "percentile", "topk-mean", "local-contrast", "local-ratio"],
-        default="local-contrast",
+        default="model",
         help="Image score aggregation from the anomaly map. model keeps Anomalib's original score.",
     )
     parser.add_argument(
@@ -689,7 +695,21 @@ def save_image(path: Path, image_rgb: np.ndarray) -> None:
     Image.fromarray(image_rgb).save(path)
 
 
-def best_f1_threshold(labelled_scores: list[tuple[float, int]]) -> dict[str, float | int] | None:
+def threshold_candidates(scores: list[float]) -> list[float]:
+    unique_scores = sorted(set(scores))
+    if not unique_scores:
+        return []
+    candidates = set(unique_scores)
+    for low, high in zip(unique_scores, unique_scores[1:]):
+        candidates.add((low + high) / 2.0)
+    span = max(unique_scores) - min(unique_scores)
+    epsilon = max(1e-6, span * 1e-6)
+    candidates.add(min(unique_scores) - epsilon)
+    candidates.add(max(unique_scores) + epsilon)
+    return sorted(candidates, reverse=True)
+
+
+def best_f1_threshold(labelled_scores: list[tuple[float, int]], objective: str = "balanced-f1") -> dict[str, Any] | None:
     if not labelled_scores:
         return None
     positives = sum(label for _, label in labelled_scores)
@@ -697,8 +717,8 @@ def best_f1_threshold(labelled_scores: list[tuple[float, int]]) -> dict[str, flo
     if positives == 0 or negatives == 0:
         return None
 
-    best: dict[str, float | int] | None = None
-    for threshold in sorted({score for score, _ in labelled_scores}, reverse=True):
+    best: dict[str, Any] | None = None
+    for threshold in threshold_candidates([score for score, _ in labelled_scores]):
         tp = fp = tn = fn = 0
         for score, label in labelled_scores:
             pred = 1 if score >= threshold else 0
@@ -712,12 +732,16 @@ def best_f1_threshold(labelled_scores: list[tuple[float, int]]) -> dict[str, flo
                 fn += 1
         precision = tp / (tp + fp) if tp + fp else 1.0
         recall = tp / (tp + fn) if tp + fn else 0.0
+        specificity = tn / (tn + fp) if tn + fp else 0.0
+        balanced_accuracy = (recall + specificity) / 2.0
         f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
         accuracy = (tp + tn) / (tp + fp + tn + fn)
         candidate = {
             "threshold": threshold,
             "precision": precision,
             "recall": recall,
+            "specificity": specificity,
+            "balanced_accuracy": balanced_accuracy,
             "f1": f1,
             "accuracy": accuracy,
             "tp": tp,
@@ -728,10 +752,28 @@ def best_f1_threshold(labelled_scores: list[tuple[float, int]]) -> dict[str, flo
         if best is None:
             best = candidate
             continue
-        best_key = (float(best["f1"]), float(best["accuracy"]), float(best["threshold"]))
-        candidate_key = (f1, accuracy, threshold)
+        if objective == "balanced-f1":
+            best_key = (
+                float(best["balanced_accuracy"]),
+                float(best["f1"]),
+                float(best["accuracy"]),
+                float(best["precision"]),
+                float(best["threshold"]),
+            )
+            candidate_key = (balanced_accuracy, f1, accuracy, precision, threshold)
+        else:
+            best_key = (
+                float(best["f1"]),
+                float(best["balanced_accuracy"]),
+                float(best["accuracy"]),
+                float(best["precision"]),
+                float(best["threshold"]),
+            )
+            candidate_key = (f1, balanced_accuracy, accuracy, precision, threshold)
         if candidate_key > best_key:
             best = candidate
+    if best is not None:
+        best["objective"] = objective
     return best
 
 
@@ -744,6 +786,63 @@ def calibration_scores(predictions: list[dict[str, Any]]) -> list[tuple[float, i
         elif label == "good":
             labelled.append((float(item["pred_score"]), 0))
     return labelled
+
+
+def score_auc(labelled_scores: list[tuple[float, int]]) -> float | None:
+    positives = [score for score, label in labelled_scores if label == 1]
+    negatives = [score for score, label in labelled_scores if label == 0]
+    if not positives or not negatives:
+        return None
+    wins = ties = total = 0
+    for positive_score in positives:
+        for negative_score in negatives:
+            total += 1
+            if positive_score > negative_score:
+                wins += 1
+            elif positive_score == negative_score:
+                ties += 1
+    return (wins + 0.5 * ties) / total if total else None
+
+
+def prediction_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    confusion = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+    labelled_scores: list[tuple[float, int]] = []
+    score_groups: dict[str, list[float]] = {"good": [], "bad": []}
+
+    for row in rows:
+        gt_label = row.get("gt_label")
+        pred_label = row.get("pred_label_name")
+        if gt_label not in {"good", "bad"}:
+            continue
+        score = float(row["pred_score"])
+        score_groups[str(gt_label)].append(score)
+        labelled_scores.append((score, 1 if gt_label == "bad" else 0))
+        if gt_label == "bad" and pred_label == "bad":
+            confusion["tp"] += 1
+        elif gt_label == "good" and pred_label == "bad":
+            confusion["fp"] += 1
+        elif gt_label == "good" and pred_label == "good":
+            confusion["tn"] += 1
+        elif gt_label == "bad" and pred_label == "good":
+            confusion["fn"] += 1
+
+    score_summary: dict[str, dict[str, float | int | None]] = {}
+    for label, scores in score_groups.items():
+        score_summary[label] = {
+            "count": len(scores),
+            "min": min(scores) if scores else None,
+            "max": max(scores) if scores else None,
+            "mean": float(np.mean(scores)) if scores else None,
+        }
+
+    total = sum(confusion.values())
+    accuracy = (confusion["tp"] + confusion["tn"]) / total if total else None
+    return {
+        "confusion": confusion,
+        "accuracy": accuracy,
+        "score_auc": score_auc(labelled_scores),
+        "score_summary": score_summary,
+    }
 
 
 def predict_path(
@@ -940,6 +1039,7 @@ def main() -> None:
     )
 
     calibration_result: dict[str, Any] | None = None
+    calibration_score_rows: list[dict[str, Any]] | None = None
     calibrated_threshold = args.calibration_threshold
     if calibrated_threshold is None and args.calibration_path is not None:
         calibration_predictions = predict_path(
@@ -955,9 +1055,20 @@ def main() -> None:
             score_topk_percent=args.score_topk_percent,
             score_local_sigma=args.score_local_sigma,
         )
-        calibration_result = best_f1_threshold(calibration_scores(calibration_predictions))
+        calibration_score_rows = [
+            {
+                "image_path": str(item["image_path"]),
+                "gt_label": infer_ground_truth_from_path(item["image_path"]),
+                "pred_score": float(item["pred_score"]),
+                "model_pred_score": float(item["model_pred_score"]),
+            }
+            for item in calibration_predictions
+        ]
+        calibration_result = best_f1_threshold(calibration_scores(calibration_predictions), args.calibration_objective)
         if calibration_result is not None:
             calibrated_threshold = float(calibration_result["threshold"])
+            if float(calibration_result.get("specificity", 0.0)) == 0.0:
+                print("[WARN] Calibration could not keep any labelled good images below threshold; predictions may over-call bad.")
         else:
             print("[WARN] Calibration path did not contain both good and bad labelled samples; using model labels if available.")
     elif calibrated_threshold is not None:
@@ -1070,6 +1181,14 @@ def main() -> None:
         }
         rows.append(row)
 
+    diagnostics = prediction_diagnostics(rows)
+    score_auc_value = diagnostics.get("score_auc")
+    if score_auc_value is not None and float(score_auc_value) < 0.6:
+        print(
+            "[WARN] Prediction scores have weak good/bad separation "
+            f"(AUC={float(score_auc_value):.3f}). Try a larger aspect-preserving image size or a different model.",
+        )
+
     csv_path = args.output_dir / "predictions.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -1101,11 +1220,14 @@ def main() -> None:
         "score_local_sigma": args.score_local_sigma,
         "roi_mode": args.roi_mode,
         "calibration_path": str(args.calibration_path) if args.calibration_path else None,
+        "calibration_objective": args.calibration_objective,
         "calibrated_threshold": calibrated_threshold,
         "calibration_result": calibration_result,
+        "calibration_scores": calibration_score_rows,
         "heatmap_normalization": args.heatmap_normalization,
         "global_anomaly_map_min": global_map_min,
         "global_anomaly_map_max": global_map_max,
+        "prediction_diagnostics": diagnostics,
         "num_predictions": len(rows),
         "csv": str(csv_path),
         "report_html": str(html_path),
@@ -1124,6 +1246,10 @@ def main() -> None:
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
     print(f"[INFO] Threshold  : {calibrated_threshold if calibrated_threshold is not None else 'model/default'}")
+    if diagnostics["accuracy"] is not None:
+        print(f"[INFO] Accuracy   : {float(diagnostics['accuracy']):.4f}")
+    if diagnostics["score_auc"] is not None:
+        print(f"[INFO] Score AUC  : {float(diagnostics['score_auc']):.4f}")
     print(f"[INFO] CSV        : {csv_path}")
     print(f"[INFO] HTML       : {html_path}")
     print("=" * 80)
