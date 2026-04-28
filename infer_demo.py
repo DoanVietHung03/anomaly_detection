@@ -29,8 +29,11 @@ DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
 SCORE_AGGREGATION_CHOICES = (
     "model",
+    "pixel-mean",
     "pixel-topk",
     "pixel-percentile",
+    "blob-count",
+    "blob-score",
     "max",
     "percentile",
     "topk-mean",
@@ -130,8 +133,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
-        default="pixel-topk",
-        help="Image score aggregation. pixel-topk/percentile use ROI anomaly-map evidence instead of Anomalib's image score.",
+        default="pixel-mean",
+        help="Image score aggregation. pixel/blob modes use ROI anomaly-map evidence instead of Anomalib's image score.",
     )
     parser.add_argument(
         "--score-percentile",
@@ -150,6 +153,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=15.0,
         help="Gaussian sigma for local-contrast/local-ratio score aggregation.",
+    )
+    parser.add_argument(
+        "--score-blob-threshold",
+        type=float,
+        default=15.0,
+        help="Anomaly-map threshold used to count hot connected components when --score-aggregation blob-*.",
+    )
+    parser.add_argument(
+        "--score-blob-strong-threshold",
+        type=float,
+        default=18.0,
+        help="Higher anomaly-map threshold used for the largest hot component term in blob-score.",
+    )
+    parser.add_argument(
+        "--score-blob-min-area",
+        type=int,
+        default=1,
+        help="Minimum connected-component area in anomaly-map pixels for blob-count/blob-score.",
+    )
+    parser.add_argument(
+        "--score-blob-area-weight",
+        type=float,
+        default=5000.0,
+        help="Weight applied to largest strong blob area fraction in blob-score.",
     )
     parser.add_argument(
         "--tiling",
@@ -634,15 +661,35 @@ def aggregate_anomaly_score(
     percentile: float,
     topk_percent: float,
     local_sigma: float,
+    blob_threshold: float,
+    blob_strong_threshold: float,
+    blob_min_area: int,
+    blob_area_weight: float,
 ) -> float:
     if aggregation == "model":
         return float(model_score)
+    if aggregation == "pixel-mean":
+        values = anomaly_map.astype(np.float32, copy=False)[roi_mask]
+        if values.size == 0:
+            values = anomaly_map.astype(np.float32, copy=False).reshape(-1)
+        return float(values.mean())
     if aggregation == "pixel-topk":
         aggregation = "topk-mean"
     elif aggregation == "pixel-percentile":
         aggregation = "percentile"
 
     score_map = anomaly_map.astype(np.float32, copy=False)
+    if aggregation in {"blob-count", "blob-score"}:
+        return aggregate_blob_score(
+            score_map,
+            roi_mask=roi_mask,
+            aggregation=aggregation,
+            threshold=blob_threshold,
+            strong_threshold=blob_strong_threshold,
+            min_area=blob_min_area,
+            area_weight=blob_area_weight,
+        )
+
     if aggregation == "local-contrast":
         baseline = cv2.GaussianBlur(score_map, (0, 0), sigmaX=local_sigma, sigmaY=local_sigma)
         score_map = score_map - baseline
@@ -667,6 +714,39 @@ def aggregate_anomaly_score(
         top_values = np.partition(values, values.size - k)[-k:]
         return float(top_values.mean())
     raise ValueError(f"Unknown score aggregation: {aggregation}")
+
+
+def connected_component_stats(mask: np.ndarray, min_area: int) -> tuple[int, int]:
+    if not np.any(mask):
+        return 0, 0
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    areas = [int(area) for area in stats[1:, cv2.CC_STAT_AREA] if int(area) >= min_area]
+    if not areas:
+        return 0, 0
+    return len(areas), max(areas)
+
+
+def aggregate_blob_score(
+    score_map: np.ndarray,
+    *,
+    roi_mask: np.ndarray,
+    aggregation: str,
+    threshold: float,
+    strong_threshold: float,
+    min_area: int,
+    area_weight: float,
+) -> float:
+    min_area = max(1, int(min_area))
+    roi_pixels = max(1, int(roi_mask.sum()))
+    hot_mask = (score_map >= float(threshold)) & roi_mask
+    component_count, _ = connected_component_stats(hot_mask, min_area)
+    if aggregation == "blob-count":
+        return float(component_count)
+
+    strong_mask = (score_map >= float(strong_threshold)) & roi_mask
+    _, largest_strong_area = connected_component_stats(strong_mask, min_area)
+    largest_strong_fraction = float(largest_strong_area) / float(roi_pixels)
+    return float(component_count + float(area_weight) * largest_strong_fraction)
 
 
 def make_heatmap(gray_map: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
@@ -939,6 +1019,10 @@ def predict_path(
     score_percentile: float,
     score_topk_percent: float,
     score_local_sigma: float,
+    score_blob_threshold: float,
+    score_blob_strong_threshold: float,
+    score_blob_min_area: int,
+    score_blob_area_weight: float,
 ) -> list[dict[str, Any]]:
     dataset = predict_dataset_cls(path=path, image_size=image_size)
     predictions = engine.predict(
@@ -978,6 +1062,10 @@ def predict_path(
             percentile=score_percentile,
             topk_percent=score_topk_percent,
             local_sigma=score_local_sigma,
+            blob_threshold=score_blob_threshold,
+            blob_strong_threshold=score_blob_strong_threshold,
+            blob_min_area=score_blob_min_area,
+            blob_area_weight=score_blob_area_weight,
         )
         prepared.append(
             {
@@ -995,6 +1083,10 @@ def predict_path(
                 "fixed_roi_box": fixed_roi_box(image_rgb.shape[:2], fixed_roi),
                 "score_aggregation": score_aggregation,
                 "score_local_sigma": score_local_sigma,
+                "score_blob_threshold": score_blob_threshold,
+                "score_blob_strong_threshold": score_blob_strong_threshold,
+                "score_blob_min_area": score_blob_min_area,
+                "score_blob_area_weight": score_blob_area_weight,
                 "roi_mode": roi_mode,
                 "image_rgb": image_rgb,
             },
@@ -1098,6 +1190,14 @@ def main() -> None:
         raise SystemExit("--score-topk-percent must be in the range (0, 100].")
     if args.score_local_sigma <= 0.0:
         raise SystemExit("--score-local-sigma must be positive.")
+    if not np.isfinite(args.score_blob_threshold):
+        raise SystemExit("--score-blob-threshold must be finite.")
+    if not np.isfinite(args.score_blob_strong_threshold):
+        raise SystemExit("--score-blob-strong-threshold must be finite.")
+    if args.score_blob_min_area <= 0:
+        raise SystemExit("--score-blob-min-area must be a positive integer.")
+    if args.score_blob_area_weight < 0.0:
+        raise SystemExit("--score-blob-area-weight must be non-negative.")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     original_dir = args.output_dir / "originals"
@@ -1150,6 +1250,10 @@ def main() -> None:
             score_percentile=args.score_percentile,
             score_topk_percent=args.score_topk_percent,
             score_local_sigma=args.score_local_sigma,
+            score_blob_threshold=args.score_blob_threshold,
+            score_blob_strong_threshold=args.score_blob_strong_threshold,
+            score_blob_min_area=args.score_blob_min_area,
+            score_blob_area_weight=args.score_blob_area_weight,
         )
         calibration_score_rows = [
             {
@@ -1160,6 +1264,10 @@ def main() -> None:
                 "roi_mode": str(item["roi_mode"]),
                 "roi_coverage": float(item["roi_coverage"]),
                 "score_aggregation": str(item["score_aggregation"]),
+                "score_blob_threshold": float(item["score_blob_threshold"]),
+                "score_blob_strong_threshold": float(item["score_blob_strong_threshold"]),
+                "score_blob_min_area": int(item["score_blob_min_area"]),
+                "score_blob_area_weight": float(item["score_blob_area_weight"]),
             }
             for item in calibration_predictions
         ]
@@ -1183,10 +1291,14 @@ def main() -> None:
         roi_mode=args.roi_mode,
         fixed_roi=fixed_roi,
         score_aggregation=args.score_aggregation,
-        score_percentile=args.score_percentile,
-        score_topk_percent=args.score_topk_percent,
-        score_local_sigma=args.score_local_sigma,
-    )
+            score_percentile=args.score_percentile,
+            score_topk_percent=args.score_topk_percent,
+            score_local_sigma=args.score_local_sigma,
+            score_blob_threshold=args.score_blob_threshold,
+            score_blob_strong_threshold=args.score_blob_strong_threshold,
+            score_blob_min_area=args.score_blob_min_area,
+            score_blob_area_weight=args.score_blob_area_weight,
+        )
 
     map_mins = [float(item["anomaly_map_min"]) for item in prepared_predictions]
     map_maxs = [float(item["anomaly_map_max"]) for item in prepared_predictions]
@@ -1265,6 +1377,10 @@ def main() -> None:
             "score_mode": args.score_mode,
             "score_aggregation": item["score_aggregation"],
             "score_local_sigma": item["score_local_sigma"],
+            "score_blob_threshold": item["score_blob_threshold"],
+            "score_blob_strong_threshold": item["score_blob_strong_threshold"],
+            "score_blob_min_area": item["score_blob_min_area"],
+            "score_blob_area_weight": item["score_blob_area_weight"],
             "roi_mode": item["roi_mode"],
             "roi_coverage": item["roi_coverage"],
             "fixed_roi": ",".join(f"{value:.4f}" for value in fixed_roi),
@@ -1323,6 +1439,10 @@ def main() -> None:
         "score_percentile": args.score_percentile,
         "score_topk_percent": args.score_topk_percent,
         "score_local_sigma": args.score_local_sigma,
+        "score_blob_threshold": args.score_blob_threshold,
+        "score_blob_strong_threshold": args.score_blob_strong_threshold,
+        "score_blob_min_area": args.score_blob_min_area,
+        "score_blob_area_weight": args.score_blob_area_weight,
         "roi_mode": args.roi_mode,
         "fixed_roi": list(fixed_roi),
         "calibration_path": str(args.calibration_path) if args.calibration_path else None,
@@ -1351,6 +1471,12 @@ def main() -> None:
         print(f"[INFO] Precision  : {args.patchcore_precision}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
+    if args.score_aggregation in {"blob-count", "blob-score"}:
+        print(
+            "[INFO] Blob score : "
+            f"thr={args.score_blob_threshold}, strong={args.score_blob_strong_threshold}, "
+            f"min_area={args.score_blob_min_area}, area_weight={args.score_blob_area_weight}",
+        )
     print(f"[INFO] Fixed ROI  : {','.join(f'{value:.4f}' for value in fixed_roi)}")
     print(f"[INFO] Threshold  : {calibrated_threshold if calibrated_threshold is not None else 'model/default'}")
     if diagnostics["accuracy"] is not None:

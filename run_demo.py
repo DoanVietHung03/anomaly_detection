@@ -26,8 +26,11 @@ DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
 SCORE_AGGREGATION_CHOICES = (
     "model",
+    "pixel-mean",
     "pixel-topk",
     "pixel-percentile",
+    "blob-count",
+    "blob-score",
     "max",
     "percentile",
     "topk-mean",
@@ -172,8 +175,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
-        default="pixel-topk",
-        help="Image score aggregation used by infer_demo.py. pixel-topk is the ROI/pixel-level default.",
+        default="pixel-mean",
+        help="Image score aggregation used by infer_demo.py. pixel/blob modes use ROI/pixel evidence.",
     )
     parser.add_argument(
         "--calibration-objective",
@@ -198,6 +201,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=15.0,
         help="Gaussian sigma for local-contrast/local-ratio score aggregation.",
+    )
+    parser.add_argument(
+        "--score-blob-threshold",
+        type=float,
+        default=15.0,
+        help="Anomaly-map threshold used to count hot connected components when --score-aggregation blob-*.",
+    )
+    parser.add_argument(
+        "--score-blob-strong-threshold",
+        type=float,
+        default=18.0,
+        help="Higher anomaly-map threshold used for the largest hot component term in blob-score.",
+    )
+    parser.add_argument(
+        "--score-blob-min-area",
+        type=int,
+        default=1,
+        help="Minimum connected-component area in anomaly-map pixels for blob-count/blob-score.",
+    )
+    parser.add_argument(
+        "--score-blob-area-weight",
+        type=float,
+        default=5000.0,
+        help="Weight applied to largest strong blob area fraction in blob-score.",
     )
     parser.add_argument("--accelerator", type=str, default="gpu", help="Lightning accelerator.")
     parser.add_argument("--devices", type=str, default="1", help="Lightning devices value.")
@@ -351,6 +378,10 @@ def main() -> None:
     output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}"), project_root)
     image_size = resolve_image_size(args)
     fixed_roi = validate_fixed_roi(args.fixed_roi)
+    if args.score_blob_min_area <= 0:
+        raise SystemExit("--score-blob-min-area must be a positive integer.")
+    if args.score_blob_area_weight < 0.0:
+        raise SystemExit("--score-blob-area-weight must be non-negative.")
     epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
     default_batch_size = 1
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
@@ -505,6 +536,14 @@ def main() -> None:
         str(args.score_topk_percent),
         "--score-local-sigma",
         str(args.score_local_sigma),
+        "--score-blob-threshold",
+        str(args.score_blob_threshold),
+        "--score-blob-strong-threshold",
+        str(args.score_blob_strong_threshold),
+        "--score-blob-min-area",
+        str(args.score_blob_min_area),
+        "--score-blob-area-weight",
+        str(args.score_blob_area_weight),
         "--heatmap-normalization",
         args.heatmap_normalization,
         "--calibration-objective",
