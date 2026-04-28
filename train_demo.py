@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 try:
     from anomalib.data import MVTecAD2 as _MVTecAD2Base
 except Exception:  # pragma: no cover - import_dependencies handles the runtime error message.

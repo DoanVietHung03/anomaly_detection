@@ -7,10 +7,13 @@ import argparse
 import csv
 import html
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import cv2
 import numpy as np
