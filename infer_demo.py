@@ -16,12 +16,12 @@ import cv2
 import numpy as np
 from PIL import Image
 
-DEFAULT_IMAGE_SIZE = (512, 1116)
-DEFAULT_TILING = "auto"
+DEFAULT_IMAGE_SIZE = (384, 837)
+DEFAULT_TILING = "off"
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
-DEFAULT_PATCHCORE_CORESET_RATIO = 0.15
+DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
-DEFAULT_PATCHCORE_PRECISION = "float32"
+DEFAULT_PATCHCORE_PRECISION = "float16"
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,8 +72,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional square PredictDataset image size. Overridden by --image-height/--image-width.",
     )
-    parser.add_argument("--image-height", type=int, default=None, help="PredictDataset image height. Defaults to 512.")
-    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 1116.")
+    parser.add_argument("--image-height", type=int, default=None, help="PredictDataset image height. Defaults to 384.")
+    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 837.")
     parser.add_argument(
         "--calibration-path",
         type=Path,
@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
         "--tiling",
         choices=["auto", "on", "off"],
         default=DEFAULT_TILING,
-        help="Enable tiled PatchCore inference. auto enables it for PatchCore.",
+        help="Enable tiled PatchCore inference. off is the memory-safe default for wide can images.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument(
