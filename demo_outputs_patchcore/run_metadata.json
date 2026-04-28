@@ -1,0 +1,126 @@
+{
+  "checkpoint": "/home/hsv/hungdv/anomaly_detection/runs_patchcore/Patchcore/SafeMVTecAD2/can/v0/weights/lightning/model.ckpt",
+  "input_path": "/home/hsv/hungdv/anomaly_detection/demo_inputs",
+  "dataset_root": "/home/hsv/hungdv/anomaly_detection/can",
+  "category": "can",
+  "test_type": "public",
+  "model": "patchcore",
+  "image_size": "384x837",
+  "image_height": 384,
+  "image_width": 837,
+  "tiling": {
+    "enabled": false,
+    "tile_size": null,
+    "tile_stride": null
+  },
+  "patchcore_layers": [
+    "layer2",
+    "layer3"
+  ],
+  "patchcore_coreset_ratio": 0.05,
+  "patchcore_num_neighbors": 9,
+  "patchcore_precision": "float16",
+  "score_mode": "raw",
+  "score_aggregation": "model",
+  "score_percentile": 99.95,
+  "score_topk_percent": 0.02,
+  "score_local_sigma": 15.0,
+  "roi_mode": "foreground",
+  "calibration_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs",
+  "calibration_objective": "balanced-f1",
+  "calibrated_threshold": 32.625,
+  "calibration_result": {
+    "threshold": 32.625,
+    "precision": 0.5,
+    "recall": 1.0,
+    "specificity": 0.0,
+    "balanced_accuracy": 0.5,
+    "f1": 0.6666666666666666,
+    "accuracy": 0.5,
+    "tp": 4,
+    "fp": 4,
+    "tn": 0,
+    "fn": 0,
+    "objective": "balanced-f1"
+  },
+  "calibration_scores": [
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/000_bad_003_regular.png",
+      "gt_label": "bad",
+      "pred_score": 43.3125,
+      "model_pred_score": 43.3125
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/001_bad_014_regular.png",
+      "gt_label": "bad",
+      "pred_score": 45.65625,
+      "model_pred_score": 45.65625
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/002_bad_002_regular.png",
+      "gt_label": "bad",
+      "pred_score": 32.625,
+      "model_pred_score": 32.625
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/003_bad_011_regular.png",
+      "gt_label": "bad",
+      "pred_score": 43.125,
+      "model_pred_score": 43.125
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/000_good_010_regular.png",
+      "gt_label": "good",
+      "pred_score": 41.5625,
+      "model_pred_score": 41.5625
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/001_good_001_regular.png",
+      "gt_label": "good",
+      "pred_score": 44.25,
+      "model_pred_score": 44.25
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/002_good_000_regular.png",
+      "gt_label": "good",
+      "pred_score": 45.15625,
+      "model_pred_score": 45.15625
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/003_good_004_regular.png",
+      "gt_label": "good",
+      "pred_score": 45.6875,
+      "model_pred_score": 45.6875
+    }
+  ],
+  "heatmap_normalization": "global",
+  "global_anomaly_map_min": 1.8251953125,
+  "global_anomaly_map_max": 48.8125,
+  "prediction_diagnostics": {
+    "confusion": {
+      "tp": 6,
+      "fp": 6,
+      "tn": 2,
+      "fn": 2
+    },
+    "accuracy": 0.5,
+    "score_auc": 0.5,
+    "score_summary": {
+      "good": {
+        "count": 8,
+        "min": 31.75,
+        "max": 50.15625,
+        "mean": 39.90234375
+      },
+      "bad": {
+        "count": 8,
+        "min": 29.390625,
+        "max": 47.59375,
+        "mean": 39.83203125
+      }
+    }
+  },
+  "num_predictions": 16,
+  "csv": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore/predictions.csv",
+  "report_html": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore/report.html"
+}
