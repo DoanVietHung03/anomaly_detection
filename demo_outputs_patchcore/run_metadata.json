@@ -39,9 +39,9 @@
     "tn": 0,
     "fn": 0
   },
-  "heatmap_normalization": "per-image",
-  "global_anomaly_map_min": 2.5859375,
-  "global_anomaly_map_max": 61.625,
+  "heatmap_normalization": "global",
+  "global_anomaly_map_min": 1.095703125,
+  "global_anomaly_map_max": 45.4375,
   "num_predictions": 16,
   "csv": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore/predictions.csv",
   "report_html": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore/report.html"

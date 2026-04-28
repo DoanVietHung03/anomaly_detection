@@ -22,7 +22,7 @@
   "eval_batch_size": 8,
   "num_workers": 8,
   "test_type": "public",
-  "test_variant": "all",
+  "test_variant": "regular",
   "dataset_variant_summary": {
     "train_good": {
       "regular": 412
@@ -55,9 +55,9 @@
   "metrics_csv": "/home/hsv/hungdv/anomaly_detection/runs_patchcore/logs/patchcore_can/version_0/metrics.csv",
   "test_results": [
     {
-      "image_AUROC": 0.504706859588623,
-      "image_F1Score": 0.2786885201931,
-      "pixel_AUROC": 0.6380990743637085,
+      "image_AUROC": 0.5277777910232544,
+      "image_F1Score": 0.0,
+      "pixel_AUROC": 0.6134908199310303,
       "pixel_F1Score": 0.0
     }
   ]
