@@ -931,7 +931,13 @@ def main() -> None:
     model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
     configure_score_mode(model, args.score_mode)
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
-    engine = engine_cls(callbacks=callbacks, accelerator=args.accelerator, devices=args.devices)
+    precision_flag = "16-true" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
+    engine = engine_cls(
+        callbacks=callbacks,
+        accelerator=args.accelerator,
+        devices=args.devices,
+        precision=precision_flag,
+    )
 
     calibration_result: dict[str, Any] | None = None
     calibrated_threshold = args.calibration_threshold
