@@ -1,0 +1,51 @@
+{
+  "dataset_root": "/home/hsv/hungdv/anomaly_detection/can",
+  "category": "can",
+  "output_dir": "/home/hsv/hungdv/anomaly_detection/calibration_inputs",
+  "variants": "all",
+  "seed": 42,
+  "num_good": 4,
+  "num_bad": 4,
+  "samples": [
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/002_shift_1.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/000_good_002_shift_1.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/000_shift_2.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/001_good_000_shift_2.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/005_underexposed.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/002_good_005_underexposed.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/good/005_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/003_good_005_regular.png",
+      "label": "good"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/004_shift_3.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/000_bad_004_shift_3.png",
+      "label": "bad"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/002_underexposed.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/001_bad_002_underexposed.png",
+      "label": "bad"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/002_regular.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/002_bad_002_regular.png",
+      "label": "bad"
+    },
+    {
+      "source": "/home/hsv/hungdv/anomaly_detection/can/can/test_public/bad/014_shift_1.png",
+      "destination": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/003_bad_014_shift_1.png",
+      "label": "bad"
+    }
+  ]
+}
