@@ -20,6 +20,18 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
+ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
+SCORE_AGGREGATION_CHOICES = (
+    "model",
+    "pixel-topk",
+    "pixel-percentile",
+    "max",
+    "percentile",
+    "topk-mean",
+    "local-contrast",
+    "local-ratio",
+)
 REQUIRED_IMPORTS = {
     "anomalib": "Anomalib",
     "cv2": "OpenCV",
@@ -57,8 +69,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None, help="Training epochs. Defaults by model.")
     parser.add_argument("--num-good", type=int, default=8, help="Number of good demo images to sample.")
     parser.add_argument("--num-bad", type=int, default=8, help="Number of anomalous demo images to sample.")
-    parser.add_argument("--num-calibration-good", type=int, default=4, help="Number of good calibration images to sample.")
-    parser.add_argument("--num-calibration-bad", type=int, default=4, help="Number of bad calibration images to sample.")
+    parser.add_argument("--num-calibration-good", type=int, default=30, help="Number of good calibration images to sample.")
+    parser.add_argument("--num-calibration-bad", type=int, default=30, help="Number of bad calibration images to sample.")
     parser.add_argument("--train-batch-size", type=int, default=None, help="Training batch size.")
     parser.add_argument("--eval-batch-size", type=int, default=1, help="Eval/test batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
@@ -124,6 +136,18 @@ def parse_args() -> argparse.Namespace:
         help="Variant filter for sampled demo inputs. Defaults to --test-variant.",
     )
     parser.add_argument(
+        "--calibration-variants",
+        nargs="+",
+        default=None,
+        choices=VARIANT_CHOICES,
+        help="Variant filter for calibration inputs. Defaults to --demo-variants/--test-variant.",
+    )
+    parser.add_argument(
+        "--exclude-calibration-from-demo",
+        action="store_true",
+        help="Keep demo samples distinct from calibration samples. With large regular calibration this may leave few demo images.",
+    )
+    parser.add_argument(
         "--heatmap-normalization",
         choices=["global", "per-image"],
         default="global",
@@ -131,15 +155,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--roi-mode",
-        choices=["foreground", "off"],
-        default="foreground",
-        help="Restrict inference score aggregation to the foreground object.",
+        choices=ROI_MODE_CHOICES,
+        default="fixed-foreground",
+        help="Restrict inference score aggregation to a fixed can ROI, foreground mask, both, or the full image.",
+    )
+    parser.add_argument(
+        "--fixed-roi",
+        nargs=4,
+        type=float,
+        default=list(DEFAULT_FIXED_ROI),
+        metavar=("X1", "Y1", "X2", "Y2"),
+        help="Fixed ROI as normalized fractions of width/height. Default keeps the can body and skips borders/glare edges.",
     )
     parser.add_argument(
         "--score-aggregation",
-        choices=["model", "max", "percentile", "topk-mean", "local-contrast", "local-ratio"],
-        default="model",
-        help="Image score aggregation used by infer_demo.py.",
+        choices=SCORE_AGGREGATION_CHOICES,
+        default="pixel-topk",
+        help="Image score aggregation used by infer_demo.py. pixel-topk is the ROI/pixel-level default.",
     )
     parser.add_argument(
         "--calibration-objective",
@@ -156,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-topk-percent",
         type=float,
-        default=0.02,
+        default=0.05,
         help="Percentage of highest ROI pixels averaged by top-k based score aggregations.",
     )
     parser.add_argument(
@@ -189,6 +221,16 @@ def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
     if image_size[0] <= 0 or image_size[1] <= 0:
         raise SystemExit("Image height and width must be positive integers.")
     return image_size
+
+
+def validate_fixed_roi(values: list[float] | tuple[float, ...]) -> tuple[float, float, float, float]:
+    roi = tuple(float(value) for value in values)
+    if len(roi) != 4:
+        raise SystemExit("--fixed-roi expects four values: X1 Y1 X2 Y2.")
+    x1, y1, x2, y2 = roi
+    if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
+        raise SystemExit("--fixed-roi values must satisfy 0 <= X1 < X2 <= 1 and 0 <= Y1 < Y2 <= 1.")
+    return roi
 
 
 def format_command(command: list[str]) -> str:
@@ -306,10 +348,12 @@ def main() -> None:
     calibration_dir = project_path(args.calibration_dir, project_root)
     output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}"), project_root)
     image_size = resolve_image_size(args)
+    fixed_roi = validate_fixed_roi(args.fixed_roi)
     epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
     default_batch_size = 1
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
     demo_variants = args.demo_variants if args.demo_variants is not None else args.test_variant
+    calibration_variants = args.calibration_variants if args.calibration_variants is not None else demo_variants
 
     args.dataset_root = dataset_root
     if not args.skip_checks:
@@ -386,7 +430,7 @@ def main() -> None:
             "--seed",
             str(args.seed),
             "--variants",
-            *demo_variants,
+            *calibration_variants,
             "--manifest-path",
             str(calibration_manifest),
             "--clean",
@@ -412,7 +456,7 @@ def main() -> None:
         *demo_variants,
         "--clean",
     ]
-    if use_calibration and calibration_manifest.exists():
+    if args.exclude_calibration_from_demo and use_calibration and calibration_manifest.exists():
         prepare_command.extend(["--exclude-manifest", str(calibration_manifest)])
     run(prepare_command, project_root)
 
@@ -449,6 +493,8 @@ def main() -> None:
         args.patchcore_precision,
         "--roi-mode",
         args.roi_mode,
+        "--fixed-roi",
+        *[str(value) for value in fixed_roi],
         "--score-aggregation",
         args.score_aggregation,
         "--score-percentile",

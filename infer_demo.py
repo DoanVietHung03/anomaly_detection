@@ -22,6 +22,18 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
+ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
+SCORE_AGGREGATION_CHOICES = (
+    "model",
+    "pixel-topk",
+    "pixel-percentile",
+    "max",
+    "percentile",
+    "topk-mean",
+    "local-contrast",
+    "local-ratio",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,15 +112,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--roi-mode",
-        choices=["foreground", "off"],
-        default="foreground",
-        help="Restrict score aggregation to the foreground object to suppress white-background artifacts.",
+        choices=ROI_MODE_CHOICES,
+        default="fixed-foreground",
+        help="Restrict score aggregation to a fixed can ROI, foreground mask, both, or the full image.",
+    )
+    parser.add_argument(
+        "--fixed-roi",
+        nargs=4,
+        type=float,
+        default=list(DEFAULT_FIXED_ROI),
+        metavar=("X1", "Y1", "X2", "Y2"),
+        help="Fixed ROI as normalized fractions of width/height. Default crops the can body and skips borders/glare edges.",
     )
     parser.add_argument(
         "--score-aggregation",
-        choices=["model", "max", "percentile", "topk-mean", "local-contrast", "local-ratio"],
-        default="model",
-        help="Image score aggregation from the anomaly map. model keeps Anomalib's original score.",
+        choices=SCORE_AGGREGATION_CHOICES,
+        default="pixel-topk",
+        help="Image score aggregation. pixel-topk/percentile use ROI anomaly-map evidence instead of Anomalib's image score.",
     )
     parser.add_argument(
         "--score-percentile",
@@ -119,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-topk-percent",
         type=float,
-        default=0.02,
+        default=0.05,
         help="Percentage of highest ROI pixels averaged by top-k based score aggregations.",
     )
     parser.add_argument(
@@ -543,10 +563,63 @@ def foreground_mask_from_image(image_rgb: np.ndarray, target_hw: tuple[int, int]
     return mask_bool
 
 
-def score_mask_for_image(image_rgb: np.ndarray, anomaly_map: np.ndarray, roi_mode: str) -> np.ndarray:
+def validate_fixed_roi(values: Iterable[float]) -> tuple[float, float, float, float]:
+    roi = tuple(float(value) for value in values)
+    if len(roi) != 4:
+        raise SystemExit("--fixed-roi expects four values: X1 Y1 X2 Y2.")
+    x1, y1, x2, y2 = roi
+    if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0):
+        raise SystemExit("--fixed-roi values must satisfy 0 <= X1 < X2 <= 1 and 0 <= Y1 < Y2 <= 1.")
+    return roi
+
+
+def fixed_roi_box(shape_hw: tuple[int, int], fixed_roi: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+    height, width = shape_hw
+    x1, y1, x2, y2 = fixed_roi
+    left = int(np.floor(x1 * width))
+    top = int(np.floor(y1 * height))
+    right = int(np.ceil(x2 * width))
+    bottom = int(np.ceil(y2 * height))
+    left = min(max(left, 0), max(width - 1, 0))
+    top = min(max(top, 0), max(height - 1, 0))
+    right = min(max(right, left + 1), width)
+    bottom = min(max(bottom, top + 1), height)
+    return top, bottom, left, right
+
+
+def fixed_roi_mask(target_hw: tuple[int, int], fixed_roi: tuple[float, float, float, float]) -> np.ndarray:
+    mask = np.zeros(target_hw, dtype=bool)
+    top, bottom, left, right = fixed_roi_box(target_hw, fixed_roi)
+    mask[top:bottom, left:right] = True
+    return mask
+
+
+def crop_fixed_roi(image_rgb: np.ndarray, fixed_roi: tuple[float, float, float, float]) -> np.ndarray:
+    top, bottom, left, right = fixed_roi_box(image_rgb.shape[:2], fixed_roi)
+    return image_rgb[top:bottom, left:right].copy()
+
+
+def score_mask_for_image(
+    image_rgb: np.ndarray,
+    anomaly_map: np.ndarray,
+    roi_mode: str,
+    fixed_roi: tuple[float, float, float, float],
+) -> np.ndarray:
     if roi_mode == "off":
         return np.ones(anomaly_map.shape[:2], dtype=bool)
-    return foreground_mask_from_image(image_rgb, anomaly_map.shape[:2])
+    if roi_mode == "foreground":
+        return foreground_mask_from_image(image_rgb, anomaly_map.shape[:2])
+
+    fixed_mask = fixed_roi_mask(anomaly_map.shape[:2], fixed_roi)
+    if roi_mode == "fixed":
+        return fixed_mask
+
+    foreground_mask = foreground_mask_from_image(image_rgb, anomaly_map.shape[:2])
+    combined_mask = fixed_mask & foreground_mask
+    min_pixels = max(8, int(round(float(fixed_mask.sum()) * 0.10)))
+    if int(combined_mask.sum()) < min_pixels:
+        return fixed_mask
+    return combined_mask
 
 
 def aggregate_anomaly_score(
@@ -561,6 +634,10 @@ def aggregate_anomaly_score(
 ) -> float:
     if aggregation == "model":
         return float(model_score)
+    if aggregation == "pixel-topk":
+        aggregation = "topk-mean"
+    elif aggregation == "pixel-percentile":
+        aggregation = "percentile"
 
     score_map = anomaly_map.astype(np.float32, copy=False)
     if aggregation == "local-contrast":
@@ -854,6 +931,7 @@ def predict_path(
     ckpt_path: Path,
     image_size: tuple[int, int],
     roi_mode: str,
+    fixed_roi: tuple[float, float, float, float],
     score_aggregation: str,
     score_percentile: float,
     score_topk_percent: float,
@@ -888,7 +966,7 @@ def predict_path(
         model_pred_score = scalar_float(getattr(pred, "pred_score", None))
         pred_label = optional_int(getattr(pred, "pred_label", None))
         anomaly_map = tensor_to_numpy(anomaly_map_like).astype(np.float32)
-        roi_mask = score_mask_for_image(image_rgb, anomaly_map, roi_mode)
+        roi_mask = score_mask_for_image(image_rgb, anomaly_map, roi_mode, fixed_roi)
         pred_score = aggregate_anomaly_score(
             anomaly_map,
             model_score=model_pred_score,
@@ -911,6 +989,7 @@ def predict_path(
                 "anomaly_map_max": float(anomaly_map.max()),
                 "roi_mask": roi_mask,
                 "roi_coverage": float(roi_mask.mean()),
+                "fixed_roi_box": fixed_roi_box(image_rgb.shape[:2], fixed_roi),
                 "score_aggregation": score_aggregation,
                 "score_local_sigma": score_local_sigma,
                 "roi_mode": roi_mode,
@@ -937,6 +1016,7 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
               </div>
               <div class=\"grid\">
                 <div><p>Original</p><img src=\"{html.escape(row['original_rel'])}\"></div>
+                <div><p>Fixed ROI Crop</p><img src=\"{html.escape(row['roi_crop_rel'])}\"></div>
                 <div><p>GT Mask</p><img src=\"{html.escape(row['gt_mask_rel'])}\"></div>
                 <div><p>GT Overlay</p><img src=\"{html.escape(row['gt_overlay_rel'])}\"></div>
                 <div><p>ROI Mask</p><img src=\"{html.escape(row['roi_mask_rel'])}\"></div>
@@ -960,7 +1040,7 @@ def build_html_report(rows: list[dict[str, Any]], output_path: Path) -> None:
     .summary {{ margin-bottom: 24px; }}
     .card {{ background: white; border-radius: 12px; padding: 16px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
     .meta {{ margin-bottom: 12px; line-height: 1.6; }}
-    .grid {{ display: grid; grid-template-columns: repeat(5, minmax(180px, 1fr)); gap: 12px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
     img {{ width: 100%; border-radius: 8px; border: 1px solid #ddd; }}
     p {{ margin: 0 0 8px 0; font-weight: 600; }}
     @media (max-width: 960px) {{ .grid {{ grid-template-columns: 1fr; }} }}
@@ -990,6 +1070,7 @@ def main() -> None:
     ) = import_dependencies()
     install_checkpoint_compatibility_aliases()
     image_size = resolve_image_size(args)
+    fixed_roi = validate_fixed_roi(args.fixed_roi)
     tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
 
     ckpt_path = args.checkpoint
@@ -1022,9 +1103,20 @@ def main() -> None:
     rawmap_dir = args.output_dir / "raw_maps"
     raw_float_dir = args.output_dir / "raw_float_maps"
     roi_mask_dir = args.output_dir / "roi_masks"
+    roi_crop_dir = args.output_dir / "roi_crops"
     gt_mask_dir = args.output_dir / "gt_masks"
     gt_overlay_dir = args.output_dir / "gt_overlays"
-    for d in (original_dir, heatmap_dir, overlay_dir, rawmap_dir, raw_float_dir, roi_mask_dir, gt_mask_dir, gt_overlay_dir):
+    for d in (
+        original_dir,
+        heatmap_dir,
+        overlay_dir,
+        rawmap_dir,
+        raw_float_dir,
+        roi_mask_dir,
+        roi_crop_dir,
+        gt_mask_dir,
+        gt_overlay_dir,
+    ):
         d.mkdir(parents=True, exist_ok=True)
 
     model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
@@ -1050,6 +1142,7 @@ def main() -> None:
             ckpt_path=ckpt_path,
             image_size=image_size,
             roi_mode=args.roi_mode,
+            fixed_roi=fixed_roi,
             score_aggregation=args.score_aggregation,
             score_percentile=args.score_percentile,
             score_topk_percent=args.score_topk_percent,
@@ -1061,6 +1154,9 @@ def main() -> None:
                 "gt_label": infer_ground_truth_from_path(item["image_path"]),
                 "pred_score": float(item["pred_score"]),
                 "model_pred_score": float(item["model_pred_score"]),
+                "roi_mode": str(item["roi_mode"]),
+                "roi_coverage": float(item["roi_coverage"]),
+                "score_aggregation": str(item["score_aggregation"]),
             }
             for item in calibration_predictions
         ]
@@ -1082,6 +1178,7 @@ def main() -> None:
         ckpt_path=ckpt_path,
         image_size=image_size,
         roi_mode=args.roi_mode,
+        fixed_roi=fixed_roi,
         score_aggregation=args.score_aggregation,
         score_percentile=args.score_percentile,
         score_topk_percent=args.score_topk_percent,
@@ -1128,10 +1225,12 @@ def main() -> None:
         rawmap_path = rawmap_dir / f"{stem}.png"
         raw_float_path = raw_float_dir / f"{stem}.npy"
         roi_mask_path = roi_mask_dir / f"{stem}.png"
+        roi_crop_path = roi_crop_dir / f"{stem}.png"
         gt_mask_path = gt_mask_dir / f"{stem}.png"
         gt_overlay_path = gt_overlay_dir / f"{stem}.png"
 
         save_image(original_path, image_rgb)
+        save_image(roi_crop_path, crop_fixed_roi(image_rgb, fixed_roi))
         save_image(heatmap_path, heatmap_rgb)
         save_image(overlay_path, overlay_rgb)
         save_image(gt_overlay_path, gt_overlay_rgb)
@@ -1165,6 +1264,8 @@ def main() -> None:
             "score_local_sigma": item["score_local_sigma"],
             "roi_mode": item["roi_mode"],
             "roi_coverage": item["roi_coverage"],
+            "fixed_roi": ",".join(f"{value:.4f}" for value in fixed_roi),
+            "fixed_roi_box": ",".join(str(value) for value in item["fixed_roi_box"]),
             "gt_label": gt_label,
             "correct": correct,
             "anomaly_map_min": item["anomaly_map_min"],
@@ -1173,6 +1274,7 @@ def main() -> None:
             "original_rel": original_path.relative_to(args.output_dir).as_posix(),
             "gt_mask_rel": gt_mask_path.relative_to(args.output_dir).as_posix(),
             "gt_overlay_rel": gt_overlay_path.relative_to(args.output_dir).as_posix(),
+            "roi_crop_rel": roi_crop_path.relative_to(args.output_dir).as_posix(),
             "heatmap_rel": heatmap_path.relative_to(args.output_dir).as_posix(),
             "overlay_rel": overlay_path.relative_to(args.output_dir).as_posix(),
             "raw_map_rel": rawmap_path.relative_to(args.output_dir).as_posix(),
@@ -1219,6 +1321,7 @@ def main() -> None:
         "score_topk_percent": args.score_topk_percent,
         "score_local_sigma": args.score_local_sigma,
         "roi_mode": args.roi_mode,
+        "fixed_roi": list(fixed_roi),
         "calibration_path": str(args.calibration_path) if args.calibration_path else None,
         "calibration_objective": args.calibration_objective,
         "calibrated_threshold": calibrated_threshold,
@@ -1245,6 +1348,7 @@ def main() -> None:
         print(f"[INFO] Precision  : {args.patchcore_precision}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
+    print(f"[INFO] Fixed ROI  : {','.join(f'{value:.4f}' for value in fixed_roi)}")
     print(f"[INFO] Threshold  : {calibrated_threshold if calibrated_threshold is not None else 'model/default'}")
     if diagnostics["accuracy"] is not None:
         print(f"[INFO] Accuracy   : {float(diagnostics['accuracy']):.4f}")

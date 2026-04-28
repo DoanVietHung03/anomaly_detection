@@ -211,6 +211,8 @@ def main() -> None:
     if args.num_bad > 0 and not bad_images:
         raise SystemExit(f"No bad images matched --variants {format_variant_selection(selected_variants)}.")
 
+    available_good = len(good_images)
+    available_bad = len(bad_images)
     sampled_good = sample_paths(good_images, args.num_good, rng)
     sampled_bad = sample_paths(bad_images, args.num_bad, rng)
 
@@ -231,8 +233,14 @@ def main() -> None:
     print(f"[INFO] Variants    : {format_variant_selection(selected_variants)}")
     print(f"[INFO] Excluded    : {len(excluded_sources)} source file(s)")
     print(f"[INFO] Output dir  : {args.output_dir}")
+    print(f"[INFO] Good avail  : {available_good}")
+    print(f"[INFO] Bad avail   : {available_bad}")
     print(f"[INFO] Good copied : {len(sampled_good)}")
     print(f"[INFO] Bad copied  : {len(sampled_bad)}")
+    if args.num_good > available_good:
+        print(f"[WARN] Requested {args.num_good} good image(s), but only {available_good} matched.")
+    if args.num_bad > available_bad:
+        print(f"[WARN] Requested {args.num_bad} bad image(s), but only {available_bad} matched.")
     if args.manifest_path is not None:
         print(f"[INFO] Manifest    : {args.manifest_path}")
     print("=" * 80)
