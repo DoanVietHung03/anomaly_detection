@@ -1,0 +1,327 @@
+{
+  "checkpoint": "/home/hsv/hungdv/anomaly_detection/runs_patchcore/Patchcore/SafeMVTecAD2/can/v0/weights/lightning/model.ckpt",
+  "input_path": "/home/hsv/hungdv/anomaly_detection/demo_inputs",
+  "dataset_root": "/home/hsv/hungdv/anomaly_detection/can",
+  "category": "can",
+  "test_type": "public",
+  "model": "patchcore",
+  "image_size": "384x837",
+  "image_height": 384,
+  "image_width": 837,
+  "tiling": {
+    "enabled": false,
+    "tile_size": null,
+    "tile_stride": null
+  },
+  "patchcore_layers": [
+    "layer2",
+    "layer3"
+  ],
+  "patchcore_coreset_ratio": 0.05,
+  "patchcore_num_neighbors": 9,
+  "patchcore_precision": "float16",
+  "score_mode": "raw",
+  "score_aggregation": "pixel-topk",
+  "score_percentile": 99.95,
+  "score_topk_percent": 0.05,
+  "score_local_sigma": 15.0,
+  "roi_mode": "fixed-foreground",
+  "fixed_roi": [
+    0.06,
+    0.1,
+    0.94,
+    0.9
+  ],
+  "calibration_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs",
+  "calibration_objective": "balanced-f1",
+  "calibrated_threshold": 41.139583587646484,
+  "calibration_result": {
+    "threshold": 41.139583587646484,
+    "precision": 0.6,
+    "recall": 0.6,
+    "specificity": 0.5,
+    "balanced_accuracy": 0.55,
+    "f1": 0.6,
+    "accuracy": 0.5555555555555556,
+    "tp": 9,
+    "fp": 6,
+    "tn": 6,
+    "fn": 6,
+    "objective": "balanced-f1"
+  },
+  "calibration_scores": [
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/000_bad_000_regular.png",
+      "gt_label": "bad",
+      "pred_score": 43.58511734008789,
+      "model_pred_score": 45.21875,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6513123506571087,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/001_bad_001_regular.png",
+      "gt_label": "bad",
+      "pred_score": 42.60744094848633,
+      "model_pred_score": 44.625,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6518506073277579,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/002_bad_002_regular.png",
+      "gt_label": "bad",
+      "pred_score": 29.028743743896484,
+      "model_pred_score": 30.71875,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6582785742731979,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/003_bad_003_regular.png",
+      "gt_label": "bad",
+      "pred_score": 42.21255874633789,
+      "model_pred_score": 44.28125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.653680057745918,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/004_bad_004_regular.png",
+      "gt_label": "bad",
+      "pred_score": 26.917558670043945,
+      "model_pred_score": 29.53125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6502513938669853,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/005_bad_005_regular.png",
+      "gt_label": "bad",
+      "pred_score": 33.063079833984375,
+      "model_pred_score": 35.28125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6703193448825169,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/006_bad_006_regular.png",
+      "gt_label": "bad",
+      "pred_score": 42.12322998046875,
+      "model_pred_score": 43.53125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6554783950617284,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/007_bad_007_regular.png",
+      "gt_label": "bad",
+      "pred_score": 29.70550537109375,
+      "model_pred_score": 32.0,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6530515730784549,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/008_bad_008_regular.png",
+      "gt_label": "bad",
+      "pred_score": 41.139583587646484,
+      "model_pred_score": 42.53125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6527311081242533,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/009_bad_009_regular.png",
+      "gt_label": "bad",
+      "pred_score": 41.68055725097656,
+      "model_pred_score": 47.59375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6686952409398645,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/010_bad_010_regular.png",
+      "gt_label": "bad",
+      "pred_score": 42.74247741699219,
+      "model_pred_score": 45.15625,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6672920400238949,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/011_bad_011_regular.png",
+      "gt_label": "bad",
+      "pred_score": 42.1446418762207,
+      "model_pred_score": 43.78125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.651010553564317,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/012_bad_012_regular.png",
+      "gt_label": "bad",
+      "pred_score": 32.235267639160156,
+      "model_pred_score": 33.9375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6478245718837117,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/013_bad_013_regular.png",
+      "gt_label": "bad",
+      "pred_score": 40.05649185180664,
+      "model_pred_score": 42.28125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.643842094782955,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/bad/014_bad_014_regular.png",
+      "gt_label": "bad",
+      "pred_score": 43.39699172973633,
+      "model_pred_score": 46.125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6710753932696137,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/000_good_000_regular.png",
+      "gt_label": "good",
+      "pred_score": 42.48408126831055,
+      "model_pred_score": 44.125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6559513142174432,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/001_good_001_regular.png",
+      "gt_label": "good",
+      "pred_score": 42.254127502441406,
+      "model_pred_score": 44.28125,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6587888291517324,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/002_good_002_regular.png",
+      "gt_label": "good",
+      "pred_score": 43.322025299072266,
+      "model_pred_score": 44.4375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6532631421744325,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/003_good_003_regular.png",
+      "gt_label": "good",
+      "pred_score": 42.54642868041992,
+      "model_pred_score": 45.4375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6505625248904818,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/004_good_004_regular.png",
+      "gt_label": "good",
+      "pred_score": 43.99380874633789,
+      "model_pred_score": 46.0,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6584465850258862,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/005_good_005_regular.png",
+      "gt_label": "good",
+      "pred_score": 40.579463958740234,
+      "model_pred_score": 42.4375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6533004778972521,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/006_good_006_regular.png",
+      "gt_label": "good",
+      "pred_score": 37.380306243896484,
+      "model_pred_score": 39.59375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6562655565511748,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/007_good_007_regular.png",
+      "gt_label": "good",
+      "pred_score": 48.163326263427734,
+      "model_pred_score": 50.21875,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6578461021505376,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/008_good_008_regular.png",
+      "gt_label": "good",
+      "pred_score": 31.555866241455078,
+      "model_pred_score": 34.0625,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6555281760254879,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/009_good_009_regular.png",
+      "gt_label": "good",
+      "pred_score": 31.100744247436523,
+      "model_pred_score": 31.859375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6499744872560733,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/010_good_010_regular.png",
+      "gt_label": "good",
+      "pred_score": 40.597286224365234,
+      "model_pred_score": 42.5,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6567664774990044,
+      "score_aggregation": "pixel-topk"
+    },
+    {
+      "image_path": "/home/hsv/hungdv/anomaly_detection/calibration_inputs/good/011_good_011_regular.png",
+      "gt_label": "good",
+      "pred_score": 26.349645614624023,
+      "model_pred_score": 35.84375,
+      "roi_mode": "fixed-foreground",
+      "roi_coverage": 0.6592150786539227,
+      "score_aggregation": "pixel-topk"
+    }
+  ],
+  "heatmap_normalization": "global",
+  "global_anomaly_map_min": 1.80078125,
+  "global_anomaly_map_max": 48.71875,
+  "prediction_diagnostics": {
+    "confusion": {
+      "tp": 5,
+      "fp": 4,
+      "tn": 4,
+      "fn": 3
+    },
+    "accuracy": 0.5625,
+    "score_auc": 0.46875,
+    "score_summary": {
+      "good": {
+        "count": 8,
+        "min": 26.349645614624023,
+        "max": 48.163326263427734,
+        "mean": 39.22856545448303
+      },
+      "bad": {
+        "count": 8,
+        "min": 29.70550537109375,
+        "max": 43.58511734008789,
+        "mean": 39.3438196182251
+      }
+    }
+  },
+  "num_predictions": 16,
+  "csv": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore/predictions.csv",
+  "report_html": "/home/hsv/hungdv/anomaly_detection/demo_outputs_patchcore/report.html"
+}
