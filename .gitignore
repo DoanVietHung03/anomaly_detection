@@ -4,16 +4,15 @@ __pycache__/
 *.pyo
 *.pyd
 can/
-# demo_inputs/
-# demo_outputs_patchcore/
-# demo_outputs_efficientad/
-# dashboard_outputs/
 venv/
 env/
 *.log
-# results/
-# runs_patchcore/
-# runs_efficientad/
 datasets/
 *.tar
 VisA/
+calibration_inputs_*/
+dashboard_outputs/
+demo_inputs_*/
+demo_outputs_*/
+results/
+runs_*/
