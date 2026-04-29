@@ -16,6 +16,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
+DATASET_CHOICES = ("mvtec_ad2", "visa")
 DEFAULT_IMAGE_SIZE = (384, 837)
 DEFAULT_TILING = "off"
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
@@ -48,6 +49,12 @@ REQUIRED_IMPORTS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run train, demo input preparation, and inference.")
+    parser.add_argument(
+        "--dataset",
+        choices=DATASET_CHOICES,
+        default="mvtec_ad2",
+        help="Dataset format. Use visa for the VisA dataset.",
+    )
     parser.add_argument(
         "--dataset-root",
         type=Path,
@@ -347,12 +354,39 @@ def require_dataset(dataset_root: Path, category: str) -> list[str]:
     return errors
 
 
+def require_visa_dataset(dataset_root: Path, category: str) -> list[str]:
+    category_root = dataset_root / category
+    required_dirs = [
+        category_root / "Data" / "Images" / "Normal",
+        category_root / "Data" / "Images" / "Anomaly",
+        category_root / "Data" / "Masks" / "Anomaly",
+        dataset_root / "split_csv",
+    ]
+    errors: list[str] = []
+    if not category_root.exists():
+        return [
+            f"VisA category folder not found: {category_root}",
+            "Pass --dataset-root to the VisA folder that contains category folders and split_csv.",
+        ]
+    for path in required_dirs:
+        if not path.exists():
+            errors.append(f"Required VisA path not found: {path}")
+    if count_images(category_root / "Data" / "Images" / "Normal") == 0:
+        errors.append(f"No normal images found under: {category_root / 'Data' / 'Images' / 'Normal'}")
+    if count_images(category_root / "Data" / "Images" / "Anomaly") == 0:
+        errors.append(f"No anomaly images found under: {category_root / 'Data' / 'Images' / 'Anomaly'}")
+    return errors
+
+
 def preflight(args: argparse.Namespace) -> None:
     errors = []
     errors.extend(require_python_version())
     errors.extend(require_imports())
     errors.extend(require_cuda(args.accelerator))
-    errors.extend(require_dataset(args.dataset_root, args.category))
+    if args.dataset == "visa":
+        errors.extend(require_visa_dataset(args.dataset_root, args.category))
+    else:
+        errors.extend(require_dataset(args.dataset_root, args.category))
 
     if errors:
         raise SystemExit("[PRECHECK FAILED]\n" + "\n".join(f"- {error}" for error in errors))
@@ -399,6 +433,8 @@ def main() -> None:
     train_command = [
         python,
         "train_demo.py",
+        "--dataset",
+        args.dataset,
         "--dataset-root",
         str(dataset_root),
         "--category",
@@ -450,6 +486,8 @@ def main() -> None:
         calibration_command = [
             python,
             "prepare_demo_inputs.py",
+            "--dataset",
+            args.dataset,
             "--dataset-root",
             str(dataset_root),
             "--category",
@@ -473,6 +511,8 @@ def main() -> None:
     prepare_command = [
         python,
         "prepare_demo_inputs.py",
+        "--dataset",
+        args.dataset,
         "--dataset-root",
         str(dataset_root),
         "--category",
@@ -496,6 +536,8 @@ def main() -> None:
     infer_command = [
         python,
         "infer_demo.py",
+        "--dataset",
+        args.dataset,
         "--input-path",
         str(input_dir),
         "--results-dir",

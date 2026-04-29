@@ -28,6 +28,7 @@ except Exception:  # pragma: no cover - import_dependencies handles the runtime 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
+DATASET_CHOICES = ("mvtec_ad2", "visa")
 DEFAULT_IMAGE_SIZE = (384, 837)
 DEFAULT_TILING = "off"
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
@@ -68,6 +69,12 @@ SafeMVTecAD2.__module__ = "train_demo"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train MVTec AD 2 demo model.")
+    parser.add_argument(
+        "--dataset",
+        choices=DATASET_CHOICES,
+        default="mvtec_ad2",
+        help="Dataset format. Use visa for the VisA dataset.",
+    )
     parser.add_argument("--dataset-root", type=Path, required=True, help="Path to MVTec_AD_2 root.")
     parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category.")
     parser.add_argument(
@@ -161,7 +168,7 @@ def parse_args() -> argparse.Namespace:
 def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     try:
         from anomalib.callbacks import TilerConfigurationCallback
-        from anomalib.data import MVTecAD2
+        from anomalib.data import MVTecAD2, Visa
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
         from anomalib.models import EfficientAd, Patchcore
@@ -173,7 +180,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return MVTecAD2, Engine, (Patchcore, EfficientAd), seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
+    return (MVTecAD2, Visa), Engine, (Patchcore, EfficientAd), seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
@@ -382,6 +389,19 @@ def build_dataset_variant_summary(dataset_root: Path, category: str) -> dict[str
     }
 
 
+def build_visa_dataset_summary(dataset_root: Path, category: str) -> dict[str, dict[str, int]]:
+    raw_root = dataset_root / category / "Data"
+    split_root = dataset_root / "visa_pytorch" / category
+    return {
+        "raw_normal": {"count": len(list_image_files(raw_root / "Images" / "Normal"))},
+        "raw_anomaly": {"count": len(list_image_files(raw_root / "Images" / "Anomaly"))},
+        "raw_masks": {"count": len(list_image_files(raw_root / "Masks" / "Anomaly"))},
+        "split_train_good": {"count": len(list_image_files(split_root / "train" / "good"))},
+        "split_test_good": {"count": len(list_image_files(split_root / "test" / "good"))},
+        "split_test_bad": {"count": len(list_image_files(split_root / "test" / "bad"))},
+    }
+
+
 def print_domain_shift_warning(summary: dict[str, dict[str, int]], selected_variants: set[str] | None) -> None:
     train_variants = set(summary.get("train_good", {}))
     test_good_variants = set(summary.get("test_public_good", {}))
@@ -448,7 +468,7 @@ def make_json_safe(obj: Any) -> Any:
 def main() -> None:
     args = parse_args()
     (
-        mvtec_ad2_cls,
+        datamodule_classes,
         engine_cls,
         model_classes,
         seed_everything,
@@ -456,6 +476,7 @@ def main() -> None:
         tiler_callback_cls,
         upscale_mode_cls,
     ) = import_dependencies()
+    mvtec_ad2_cls, visa_cls = datamodule_classes
     patchcore_cls, efficient_ad_cls = model_classes
     safe_mvtec_ad2_cls = make_safe_mvtec_ad2_cls(mvtec_ad2_cls)
 
@@ -464,22 +485,35 @@ def main() -> None:
     image_size = resolve_image_size(args)
     tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
     selected_test_variants = normalize_variant_selection(args.test_variant)
-    dataset_variant_summary = build_dataset_variant_summary(args.dataset_root, args.category)
+    if args.dataset == "visa":
+        dataset_variant_summary = build_visa_dataset_summary(args.dataset_root, args.category)
+    else:
+        dataset_variant_summary = build_dataset_variant_summary(args.dataset_root, args.category)
 
     train_batch_size = args.train_batch_size
     if train_batch_size is None:
         train_batch_size = 1 if args.model == "efficientad" else 8
 
-    datamodule = safe_mvtec_ad2_cls(
-        root=args.dataset_root,
-        category=args.category,
-        train_batch_size=train_batch_size,
-        eval_batch_size=args.eval_batch_size,
-        num_workers=args.num_workers,
-        test_type=args.test_type,
-        test_variants=args.test_variant,
-        seed=args.seed,
-    )
+    if args.dataset == "visa":
+        datamodule = visa_cls(
+            root=args.dataset_root,
+            category=args.category,
+            train_batch_size=train_batch_size,
+            eval_batch_size=args.eval_batch_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+        )
+    else:
+        datamodule = safe_mvtec_ad2_cls(
+            root=args.dataset_root,
+            category=args.category,
+            train_batch_size=train_batch_size,
+            eval_batch_size=args.eval_batch_size,
+            num_workers=args.num_workers,
+            test_type=args.test_type,
+            test_variants=args.test_variant,
+            seed=args.seed,
+        )
 
     model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
     csv_logger = csv_logger_cls(
@@ -502,6 +536,7 @@ def main() -> None:
 
     print("=" * 80)
     print("[INFO] Starting training")
+    print(f"[INFO] dataset     : {args.dataset}")
     print(f"[INFO] dataset_root: {args.dataset_root}")
     print(f"[INFO] category    : {args.category}")
     print(f"[INFO] model       : {args.model}")
@@ -511,12 +546,14 @@ def main() -> None:
         print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
         print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
         print(f"[INFO] precision   : {args.patchcore_precision}")
-    print(f"[INFO] test_type   : {args.test_type}")
-    print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
+    if args.dataset != "visa":
+        print(f"[INFO] test_type   : {args.test_type}")
+        print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
     print(f"[INFO] results_dir : {args.results_dir}")
     print(f"[INFO] variants    : {dataset_variant_summary}")
-    print_domain_shift_warning(dataset_variant_summary, selected_test_variants)
-    print_threshold_warning(dataset_variant_summary)
+    if args.dataset != "visa":
+        print_domain_shift_warning(dataset_variant_summary, selected_test_variants)
+        print_threshold_warning(dataset_variant_summary)
     print_patchcore_profile_warnings(args, image_size, tiling_config)
     print("=" * 80)
 
@@ -542,6 +579,7 @@ def main() -> None:
     metrics_csv = Path(csv_logger.log_dir) / "metrics.csv"
 
     metadata = {
+        "dataset": args.dataset,
         "dataset_root": args.dataset_root,
         "category": args.category,
         "model": args.model,

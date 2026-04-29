@@ -15,10 +15,17 @@ VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IGNORED_TEST_DIRS = {"ground_truth"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
+DATASET_CHOICES = ("mvtec_ad2", "visa")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare a small demo input folder from MVTec AD 2 test_public.")
+    parser.add_argument(
+        "--dataset",
+        choices=DATASET_CHOICES,
+        default="mvtec_ad2",
+        help="Dataset format. Use visa for the VisA dataset.",
+    )
     parser.add_argument("--dataset-root", type=Path, required=True, help="Path to MVTec_AD_2 root.")
     parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category.")
     parser.add_argument("--output-dir", type=Path, default=Path("./demo_inputs"), help="Output folder.")
@@ -141,6 +148,57 @@ def exclude_sources(paths: list[Path], excluded: set[str]) -> list[Path]:
     return [path for path in paths if str(path.resolve()) not in excluded]
 
 
+def list_mvtec_test_images(
+    dataset_root: Path,
+    category: str,
+    selected_variants: set[str] | None,
+    excluded_sources: set[str],
+) -> tuple[Path, list[Path], list[Path]]:
+    category_root = dataset_root / category
+    test_public = category_root / "test_public"
+    good_dir = test_public / "good"
+
+    if not test_public.exists():
+        raise SystemExit(f"Could not find test_public directory: {test_public}")
+    if not good_dir.exists():
+        raise SystemExit(f"Could not find good directory: {good_dir}")
+
+    good_images = exclude_sources(filter_by_variants(list_images(good_dir), selected_variants), excluded_sources)
+
+    bad_images: list[Path] = []
+    for child in sorted(test_public.iterdir()):
+        child_name = child.name.lower()
+        if child.is_dir() and child_name != "good" and child_name not in IGNORED_TEST_DIRS:
+            bad_images.extend(list_images(child))
+    bad_images = exclude_sources(filter_by_variants(bad_images, selected_variants), excluded_sources)
+    return test_public, good_images, bad_images
+
+
+def list_visa_images(dataset_root: Path, category: str, excluded_sources: set[str]) -> tuple[Path, list[Path], list[Path]]:
+    split_root = dataset_root / "visa_pytorch" / category / "test"
+    split_good_dir = split_root / "good"
+    split_bad_dir = split_root / "bad"
+    if split_good_dir.exists() and split_bad_dir.exists():
+        good_images = exclude_sources(list_images(split_good_dir), excluded_sources)
+        bad_images = exclude_sources(list_images(split_bad_dir), excluded_sources)
+        return split_root, good_images, bad_images
+
+    data_root = dataset_root / category / "Data" / "Images"
+    good_dir = data_root / "Normal"
+    bad_dir = data_root / "Anomaly"
+
+    if not data_root.exists():
+        raise SystemExit(f"Could not find VisA image directory: {data_root}")
+    if not good_dir.exists():
+        raise SystemExit(f"Could not find VisA normal image directory: {good_dir}")
+    if not bad_dir.exists():
+        raise SystemExit(f"Could not find VisA anomaly image directory: {bad_dir}")
+
+    good_images = exclude_sources(list_images(good_dir), excluded_sources)
+    bad_images = exclude_sources(list_images(bad_dir), excluded_sources)
+    return data_root, good_images, bad_images
+
+
 def write_manifest(
     manifest_path: Path,
     *,
@@ -188,23 +246,15 @@ def main() -> None:
     selected_variants = normalize_variant_selection(args.variants)
     excluded_sources = load_excluded_sources(args.exclude_manifest)
 
-    category_root = args.dataset_root / args.category
-    test_public = category_root / "test_public"
-    good_dir = test_public / "good"
-
-    if not test_public.exists():
-        raise SystemExit(f"Could not find test_public directory: {test_public}")
-    if not good_dir.exists():
-        raise SystemExit(f"Could not find good directory: {good_dir}")
-
-    good_images = exclude_sources(filter_by_variants(list_images(good_dir), selected_variants), excluded_sources)
-
-    bad_images: list[Path] = []
-    for child in sorted(test_public.iterdir()):
-        child_name = child.name.lower()
-        if child.is_dir() and child_name != "good" and child_name not in IGNORED_TEST_DIRS:
-            bad_images.extend(list_images(child))
-    bad_images = exclude_sources(filter_by_variants(bad_images, selected_variants), excluded_sources)
+    if args.dataset == "visa":
+        source_root, good_images, bad_images = list_visa_images(args.dataset_root, args.category, excluded_sources)
+    else:
+        source_root, good_images, bad_images = list_mvtec_test_images(
+            args.dataset_root,
+            args.category,
+            selected_variants,
+            excluded_sources,
+        )
 
     if args.num_good > 0 and not good_images:
         raise SystemExit(f"No good images matched --variants {format_variant_selection(selected_variants)}.")
@@ -229,8 +279,10 @@ def main() -> None:
 
     print("=" * 80)
     print("[INFO] Demo inputs prepared")
-    print(f"[INFO] Source      : {test_public}")
-    print(f"[INFO] Variants    : {format_variant_selection(selected_variants)}")
+    print(f"[INFO] Dataset     : {args.dataset}")
+    print(f"[INFO] Source      : {source_root}")
+    if args.dataset != "visa":
+        print(f"[INFO] Variants    : {format_variant_selection(selected_variants)}")
     print(f"[INFO] Excluded    : {len(excluded_sources)} source file(s)")
     print(f"[INFO] Output dir  : {args.output_dir}")
     print(f"[INFO] Good avail  : {available_good}")

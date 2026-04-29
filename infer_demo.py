@@ -26,6 +26,7 @@ DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
+DATASET_CHOICES = ("mvtec_ad2", "visa")
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
 SCORE_AGGREGATION_CHOICES = (
     "model",
@@ -74,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("./can"),
         help="Path to MVTec AD 2 root. Used only to add GT masks/overlays to reports.",
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=DATASET_CHOICES,
+        default="mvtec_ad2",
+        help="Dataset format for GT mask lookup.",
     )
     parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category for GT masks.")
     parser.add_argument(
@@ -809,12 +816,28 @@ def category_roots(dataset_root: Path, category: str) -> list[Path]:
     return [root for idx, root in enumerate(roots) if root not in roots[:idx]]
 
 
-def find_gt_mask_path(dataset_root: Path, category: str, test_type: str, image_path: Path, gt_label: str | None) -> Path | None:
+def find_gt_mask_path(
+    dataset_root: Path,
+    category: str,
+    test_type: str,
+    image_path: Path,
+    gt_label: str | None,
+    dataset: str = "mvtec_ad2",
+) -> Path | None:
     if gt_label != "bad":
         return None
 
     source_name = source_image_name_from_demo_name(image_path)
     source_stem = Path(source_name).stem
+    if dataset == "visa":
+        for candidate in (
+            dataset_root / category / "Data" / "Masks" / "Anomaly" / f"{source_stem}.png",
+            dataset_root / "visa_pytorch" / category / "ground_truth" / "bad" / f"{source_stem}.png",
+        ):
+            if candidate.exists():
+                return candidate
+        return None
+
     split_name = f"test_{test_type}"
     mask_name = f"{source_stem}_mask.png"
 
@@ -837,9 +860,10 @@ def load_gt_mask(
     image_path: Path,
     image_hw: tuple[int, int],
     gt_label: str | None,
+    dataset: str = "mvtec_ad2",
 ) -> tuple[np.ndarray, Path | None]:
     target_h, target_w = image_hw
-    mask_path = find_gt_mask_path(dataset_root, category, test_type, image_path, gt_label)
+    mask_path = find_gt_mask_path(dataset_root, category, test_type, image_path, gt_label, dataset)
     if mask_path is None:
         return np.zeros((target_h, target_w), dtype=np.uint8), None
 
@@ -1330,6 +1354,7 @@ def main() -> None:
             image_path=image_path,
             image_hw=image_rgb.shape[:2],
             gt_label=gt_label,
+            dataset=args.dataset,
         )
         gt_overlay_rgb = overlay_mask(image_rgb, gt_mask)
 
@@ -1423,6 +1448,7 @@ def main() -> None:
         "checkpoint": str(ckpt_path),
         "input_path": str(args.input_path),
         "dataset_root": str(args.dataset_root),
+        "dataset": args.dataset,
         "category": args.category,
         "test_type": args.test_type,
         "model": args.model,

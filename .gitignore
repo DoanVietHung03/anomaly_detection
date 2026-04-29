@@ -15,3 +15,5 @@ env/
 # runs_patchcore/
 # runs_efficientad/
 datasets/
+*.tar
+VisA/
