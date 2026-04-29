@@ -1,68 +1,90 @@
-import os
+#!/usr/bin/env python3
+"""Zip generated server artifacts into one archive.
+
+Typical workflow:
+1. Run this script on the server.
+2. Download zipped_output/server_artifacts.zip to your local machine.
+3. Delete the server artifact folders after you have confirmed the zip is safe.
+"""
+
+from __future__ import annotations
+
+import shutil
 import zipfile
-from pathlib import Path
 from glob import glob
+from pathlib import Path
 
 
-# ====== CẤU HÌNH ======
-FOLDERS_TO_ZIP = [
-    "calibration_*",
-    "demo_*",
-    "results",
-    "runs_*",
-    "dashboard_*",
+BASE_DIR = Path(".")
+OUTPUT_DIR = Path("zipped_output")
+OUTPUT_ZIP = OUTPUT_DIR / "server_artifacts.zip"
+
+FOLDER_PATTERNS = [
+    "calibration_inputs*",
+    "demo_inputs*",
+    "demo_outputs*",
+    "dashboard_outputs*",
+    "results*",
+    "runs*",
 ]
 
-BASE_DIR = "."  # thư mục hiện tại
-OUTPUT_DIR = "zipped_output"
-# ======================
+# Keep this False until you have confirmed the zip file exists and is downloadable.
+DELETE_SOURCE_FOLDERS_AFTER_ZIP = False
 
 
-def expand_folders(patterns, base_dir):
-    all_folders = []
+def find_folders() -> list[Path]:
+    base_dir = BASE_DIR.resolve()
+    output_dir = OUTPUT_DIR.resolve()
+    folders: set[Path] = set()
 
-    for pattern in patterns:
-        full_pattern = os.path.join(base_dir, pattern)
-        matches = glob(full_pattern)
+    for pattern in FOLDER_PATTERNS:
+        for match in glob(str(base_dir / pattern)):
+            path = Path(match).resolve()
+            if not path.is_dir():
+                continue
+            if path == output_dir or output_dir in path.parents:
+                continue
+            folders.add(path)
 
-        for m in matches:
-            if os.path.isdir(m):
-                all_folders.append(m)
-
-    return list(set(all_folders))  # remove duplicate
-
-
-def zip_folder(folder_path: str, output_dir: str):
-    folder = Path(folder_path)
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    zip_path = output_dir / f"{folder.name}.zip"
-
-    print(f"[ZIP] {folder} -> {zip_path}")
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(folder):
-            for file in files:
-                file_path = Path(root) / file
-                arcname = file_path.relative_to(folder.parent)
-                zipf.write(file_path, arcname)
-
-    print(f"[DONE] {zip_path}")
+    return sorted(folders)
 
 
-def main():
-    folders = expand_folders(FOLDERS_TO_ZIP, BASE_DIR)
+def make_zip(folders: list[Path]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if OUTPUT_ZIP.exists():
+        OUTPUT_ZIP.unlink()
 
-    print("Folders tìm được:")
-    for f in folders:
-        print(" -", f)
+    with zipfile.ZipFile(OUTPUT_ZIP, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for folder in folders:
+            for file_path in sorted(folder.rglob("*")):
+                if file_path.is_file():
+                    archive.write(file_path, arcname=file_path.relative_to(BASE_DIR.resolve()))
 
+
+def delete_folders(folders: list[Path]) -> None:
     for folder in folders:
-        zip_folder(folder, OUTPUT_DIR)
+        print(f"[DELETE] {folder}")
+        shutil.rmtree(folder)
 
-    print("\nHoàn tất.")
+
+def main() -> None:
+    folders = find_folders()
+    if not folders:
+        print("[INFO] No artifact folders found.")
+        return
+
+    print("[INFO] Folders to zip:")
+    for folder in folders:
+        print(f" - {folder}")
+
+    make_zip(folders)
+    print(f"[DONE] Created: {OUTPUT_ZIP.resolve()}")
+
+    if DELETE_SOURCE_FOLDERS_AFTER_ZIP:
+        delete_folders(folders)
+        print("[DONE] Source folders deleted.")
+    else:
+        print("[INFO] Source folders kept. Set DELETE_SOURCE_FOLDERS_AFTER_ZIP = True to delete after zipping.")
 
 
 if __name__ == "__main__":
