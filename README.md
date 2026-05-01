@@ -93,22 +93,26 @@ python train_demo.py \
   --devices 1
 ```
 
-### EfficientAD (để so tốc độ)
+### PaDiM (real-time friendly baseline)
 
 ```bash
 python train_demo.py \
   --dataset-root ./can \
   --category can \
-  --model efficientad \
-  --results-dir ./runs_efficientad \
-  --epochs 20 \
-  --train-batch-size 1 \
+  --model padim \
+  --results-dir ./runs_padim \
+  --epochs 1 \
+  --image-size 384 \
+  --padim-backbone resnet18 \
+  --padim-layers layer1 layer2 layer3 \
+  --padim-n-features 100 \
+  --train-batch-size 8 \
   --eval-batch-size 8 \
   --accelerator gpu \
   --devices 1
 ```
 
-> Ghi chú: EfficientAD thường chạy với `train_batch_size=1`.
+> Ghi chú: PaDiM không train optimizer dài; nó fit Gaussian trên feature normal nên thường chạy 1 epoch.
 
 ### Chẩn đoán theo biến thể ảnh
 
@@ -196,10 +200,10 @@ Nếu dataset không nằm trong `./can`, chỉ rõ đường dẫn:
 .\venv\Scripts\python.exe run_demo.py --dataset-root /data/MVTec_AD_2
 ```
 
-Muốn chạy EfficientAD:
+Muốn chạy PaDiM:
 
 ```powershell
-.\venv\Scripts\python.exe run_demo.py --model efficientad
+.\venv\Scripts\python.exe run_demo.py --model padim
 ```
 
 ## 8) Kết quả mong đợi

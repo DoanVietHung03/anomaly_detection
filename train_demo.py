@@ -3,7 +3,7 @@
 
 This script focuses on a minimal, reproducible training flow for:
 - PatchCore
-- EfficientAD
+- PaDiM
 
 It trains on defect-free data and evaluates on the public test split.
 """
@@ -35,10 +35,9 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
-DEFAULT_EFFICIENTAD_IMAGENET_DIR = Path("./datasets/imagenette")
-DEFAULT_EFFICIENTAD_MODEL_SIZE = "small"
-DEFAULT_EFFICIENTAD_LR = 1e-4
-DEFAULT_EFFICIENTAD_WEIGHT_DECAY = 1e-5
+DEFAULT_PADIM_BACKBONE = "resnet18"
+DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
+DEFAULT_PADIM_N_FEATURES = 100
 
 
 class SafeMVTecAD2(_MVTecAD2Base):
@@ -85,7 +84,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "efficientad"],
+        choices=["patchcore", "padim"],
         help="Model to train.",
     )
     parser.add_argument("--results-dir", type=Path, default=Path("./runs"), help="Output directory.")
@@ -140,28 +139,22 @@ def parse_args() -> argparse.Namespace:
         help="PatchCore compute precision. float16 is the memory-safe default; use float32 only if memory allows.",
     )
     parser.add_argument(
-        "--efficientad-imagenet-dir",
-        type=Path,
-        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
-        help="ImageNette directory used by EfficientAD. Anomalib downloads it here if missing.",
+        "--padim-backbone",
+        default=DEFAULT_PADIM_BACKBONE,
+        help="PaDiM feature backbone. resnet18 is the real-time friendly default.",
     )
     parser.add_argument(
-        "--efficientad-model-size",
-        choices=["small", "medium"],
-        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
-        help="EfficientAD model size. small is faster/lighter; medium may improve quality at higher memory cost.",
+        "--padim-layers",
+        nargs="+",
+        default=list(DEFAULT_PADIM_LAYERS),
+        choices=["layer1", "layer2", "layer3", "layer4"],
+        help="PaDiM feature layers. layer1+layer2+layer3 is the balanced default.",
     )
     parser.add_argument(
-        "--efficientad-lr",
-        type=float,
-        default=DEFAULT_EFFICIENTAD_LR,
-        help="EfficientAD learning rate.",
-    )
-    parser.add_argument(
-        "--efficientad-weight-decay",
-        type=float,
-        default=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
-        help="EfficientAD weight decay.",
+        "--padim-n-features",
+        type=int,
+        default=DEFAULT_PADIM_N_FEATURES,
+        help="PaDiM retained feature dimensions. 100 matches the resnet18 paper default and is A4000-friendly.",
     )
     parser.add_argument(
         "--test-type",
@@ -199,7 +192,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
         from anomalib.data import MVTecAD2, Visa
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
-        from anomalib.models import EfficientAd, Patchcore
+        from anomalib.models import Padim, Patchcore
         from lightning.pytorch import seed_everything
         from lightning.pytorch.loggers import CSVLogger
     except Exception as exc:  # pragma: no cover - runtime safeguard
@@ -208,7 +201,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return (MVTecAD2, Visa), Engine, (Patchcore, EfficientAd), seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
+    return (MVTecAD2, Visa), Engine, (Patchcore, Padim), seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
@@ -288,7 +281,7 @@ def build_tiling_callbacks(
     ]
 
 
-def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+def build_model(model_name: str, patchcore_cls: Any, padim_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if model_name == "patchcore":
         model = patchcore_cls(
@@ -300,13 +293,13 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
         return model
-    if model_name == "efficientad":
-        return efficientad_cls(
-            imagenet_dir=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
-            model_size=DEFAULT_EFFICIENTAD_MODEL_SIZE,
-            lr=DEFAULT_EFFICIENTAD_LR,
-            weight_decay=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
-            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+    if model_name == "padim":
+        return padim_cls(
+            backbone=DEFAULT_PADIM_BACKBONE,
+            layers=list(DEFAULT_PADIM_LAYERS),
+            pre_trained=True,
+            n_features=DEFAULT_PADIM_N_FEATURES,
+            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     raise ValueError(f"Unsupported model: {model_name}")
 
@@ -322,7 +315,16 @@ def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
     return layers
 
 
-def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+def validate_padim_args(args: argparse.Namespace) -> tuple[str, ...]:
+    layers = tuple(dict.fromkeys(args.padim_layers))
+    if not layers:
+        raise SystemExit("--padim-layers must include at least one layer.")
+    if args.padim_n_features <= 0:
+        raise SystemExit("--padim-n-features must be a positive integer.")
+    return layers
+
+
+def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, padim_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if args.model == "patchcore":
         layers = validate_patchcore_args(args)
@@ -335,19 +337,16 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficien
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
         return model
-    if args.efficientad_lr <= 0.0:
-        raise SystemExit("--efficientad-lr must be positive.")
-    if args.efficientad_weight_decay < 0.0:
-        raise SystemExit("--efficientad-weight-decay must be non-negative.")
-    if args.model == "efficientad":
-        return efficientad_cls(
-            imagenet_dir=args.efficientad_imagenet_dir,
-            model_size=args.efficientad_model_size,
-            lr=args.efficientad_lr,
-            weight_decay=args.efficientad_weight_decay,
-            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+    if args.model == "padim":
+        layers = validate_padim_args(args)
+        return padim_cls(
+            backbone=args.padim_backbone,
+            layers=list(layers),
+            pre_trained=True,
+            n_features=args.padim_n_features,
+            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
         )
-    return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
+    return build_model(args.model, patchcore_cls, padim_cls, image_size)
 
 
 def normalize_variant_selection(variants: Iterable[str] | None) -> set[str] | None:
@@ -521,7 +520,7 @@ def main() -> None:
         upscale_mode_cls,
     ) = import_dependencies()
     mvtec_ad2_cls, visa_cls = datamodule_classes
-    patchcore_cls, efficient_ad_cls = model_classes
+    patchcore_cls, padim_cls = model_classes
     safe_mvtec_ad2_cls = make_safe_mvtec_ad2_cls(mvtec_ad2_cls)
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
@@ -536,7 +535,7 @@ def main() -> None:
 
     train_batch_size = args.train_batch_size
     if train_batch_size is None:
-        train_batch_size = 1 if args.model == "efficientad" else 8
+        train_batch_size = 8 if args.model == "padim" else 1
 
     if args.dataset == "visa":
         datamodule = visa_cls(
@@ -559,7 +558,7 @@ def main() -> None:
             seed=args.seed,
         )
 
-    model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, padim_cls, image_size)
     csv_logger = csv_logger_cls(
         save_dir=str(args.results_dir / "logs"),
         name=f"{args.model}_{args.category}",
@@ -590,10 +589,10 @@ def main() -> None:
         print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
         print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
         print(f"[INFO] precision   : {args.patchcore_precision}")
-    if args.model == "efficientad":
-        print(f"[INFO] model_size  : {args.efficientad_model_size}")
-        print(f"[INFO] imagenette  : {args.efficientad_imagenet_dir}")
-        print(f"[INFO] lr          : {args.efficientad_lr}")
+    if args.model == "padim":
+        print(f"[INFO] backbone    : {args.padim_backbone}")
+        print(f"[INFO] layers      : {','.join(validate_padim_args(args))}")
+        print(f"[INFO] n_features  : {args.padim_n_features}")
     if args.dataset != "visa":
         print(f"[INFO] test_type   : {args.test_type}")
         print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
@@ -640,10 +639,9 @@ def main() -> None:
         "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
         "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
         "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
-        "efficientad_imagenet_dir": args.efficientad_imagenet_dir if args.model == "efficientad" else None,
-        "efficientad_model_size": args.efficientad_model_size if args.model == "efficientad" else None,
-        "efficientad_lr": args.efficientad_lr if args.model == "efficientad" else None,
-        "efficientad_weight_decay": args.efficientad_weight_decay if args.model == "efficientad" else None,
+        "padim_backbone": args.padim_backbone if args.model == "padim" else None,
+        "padim_layers": list(validate_padim_args(args)) if args.model == "padim" else None,
+        "padim_n_features": args.padim_n_features if args.model == "padim" else None,
         "train_batch_size": train_batch_size,
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,

@@ -26,7 +26,7 @@ METRIC_KEYS = ("image_AUROC", "image_F1Score", "pixel_AUROC", "pixel_F1Score")
 TRAIN_METRIC_KEYS = ("train_loss", "train_st", "train_ae", "train_stae")
 MODEL_LABELS = {
     "patchcore": "PatchCore",
-    "efficientad": "EfficientAD",
+    "padim": "PaDiM",
 }
 MODEL_COLORS = ("#0f766e", "#c2410c", "#2563eb", "#7c2d12", "#4338ca", "#15803d")
 GOOD_COLOR = "#0f766e"

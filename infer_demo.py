@@ -25,8 +25,9 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
-DEFAULT_EFFICIENTAD_IMAGENET_DIR = Path("./datasets/imagenette")
-DEFAULT_EFFICIENTAD_MODEL_SIZE = "small"
+DEFAULT_PADIM_BACKBONE = "resnet18"
+DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
+DEFAULT_PADIM_N_FEATURES = 100
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 DATASET_CHOICES = ("mvtec_ad2", "visa")
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
@@ -69,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "efficientad"],
+        choices=["patchcore", "padim"],
         help="Model architecture used by the checkpoint.",
     )
     parser.add_argument(
@@ -128,8 +129,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--roi-mode",
         choices=ROI_MODE_CHOICES,
-        default="fixed-foreground",
-        help="Restrict score aggregation to a fixed can ROI, foreground mask, both, or the full image.",
+        default=None,
+        help="Restrict score aggregation. Defaults to foreground for PaDiM and fixed-foreground for PatchCore.",
     )
     parser.add_argument(
         "--fixed-roi",
@@ -143,7 +144,7 @@ def parse_args() -> argparse.Namespace:
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
         default=None,
-        help="Image score aggregation. Defaults to model for EfficientAD and pixel-mean for PatchCore.",
+        help="Image score aggregation. Defaults to pixel-percentile for PaDiM and pixel-mean for PatchCore.",
     )
     parser.add_argument(
         "--score-percentile",
@@ -226,16 +227,22 @@ def parse_args() -> argparse.Namespace:
         help="PatchCore compute precision. Must match the trained checkpoint.",
     )
     parser.add_argument(
-        "--efficientad-imagenet-dir",
-        type=Path,
-        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
-        help="ImageNette directory used by EfficientAD.",
+        "--padim-backbone",
+        default=DEFAULT_PADIM_BACKBONE,
+        help="PaDiM feature backbone. Must match the trained checkpoint.",
     )
     parser.add_argument(
-        "--efficientad-model-size",
-        choices=["small", "medium"],
-        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
-        help="EfficientAD model size. Must match the trained checkpoint.",
+        "--padim-layers",
+        nargs="+",
+        default=list(DEFAULT_PADIM_LAYERS),
+        choices=["layer1", "layer2", "layer3", "layer4"],
+        help="PaDiM feature layers. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--padim-n-features",
+        type=int,
+        default=DEFAULT_PADIM_N_FEATURES,
+        help="PaDiM retained feature dimensions. Must match the trained checkpoint.",
     )
     parser.add_argument(
         "--heatmap-normalization",
@@ -254,14 +261,14 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any]:
         from anomalib.data import PredictDataset
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
-        from anomalib.models import EfficientAd, Patchcore
+        from anomalib.models import Padim, Patchcore
     except Exception as exc:  # pragma: no cover - runtime safeguard
         raise SystemExit(
             "Failed to import Anomalib stack. Install dependencies first, for example:\n"
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return PredictDataset, Engine, Patchcore, EfficientAd, TilerConfigurationCallback, ImageUpscaleMode
+    return PredictDataset, Engine, Patchcore, Padim, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def install_checkpoint_compatibility_aliases() -> None:
@@ -361,7 +368,7 @@ def build_tiling_callbacks(
     ]
 
 
-def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+def build_model(model_name: str, patchcore_cls: Any, padim_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if model_name == "patchcore":
         return patchcore_cls(
@@ -372,11 +379,13 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
             precision=DEFAULT_PATCHCORE_PRECISION,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
-    if model_name == "efficientad":
-        return efficientad_cls(
-            imagenet_dir=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
-            model_size=DEFAULT_EFFICIENTAD_MODEL_SIZE,
-            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+    if model_name == "padim":
+        return padim_cls(
+            backbone=DEFAULT_PADIM_BACKBONE,
+            layers=list(DEFAULT_PADIM_LAYERS),
+            pre_trained=True,
+            n_features=DEFAULT_PADIM_N_FEATURES,
+            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     raise ValueError(f"Unsupported model: {model_name}")
 
@@ -392,11 +401,24 @@ def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
     return layers
 
 
+def validate_padim_args(args: argparse.Namespace) -> tuple[str, ...]:
+    layers = tuple(dict.fromkeys(args.padim_layers))
+    if not layers:
+        raise SystemExit("--padim-layers must include at least one layer.")
+    if args.padim_n_features <= 0:
+        raise SystemExit("--padim-n-features must be a positive integer.")
+    return layers
+
+
 def default_score_aggregation(model_name: str) -> str:
-    return "model" if model_name == "efficientad" else "pixel-mean"
+    return "pixel-percentile" if model_name == "padim" else "pixel-mean"
 
 
-def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
+def default_roi_mode(model_name: str) -> str:
+    return "foreground" if model_name == "padim" else "fixed-foreground"
+
+
+def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, padim_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if args.model == "patchcore":
         layers = validate_patchcore_args(args)
@@ -408,13 +430,16 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficien
             precision=args.patchcore_precision,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
-    if args.model == "efficientad":
-        return efficientad_cls(
-            imagenet_dir=args.efficientad_imagenet_dir,
-            model_size=args.efficientad_model_size,
-            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+    if args.model == "padim":
+        layers = validate_padim_args(args)
+        return padim_cls(
+            backbone=args.padim_backbone,
+            layers=list(layers),
+            pre_trained=True,
+            n_features=args.padim_n_features,
+            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
         )
-    return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
+    return build_model(args.model, patchcore_cls, padim_cls, image_size)
 
 
 def flatten_predictions(predictions: Any) -> list[Any]:
@@ -1209,7 +1234,7 @@ def main() -> None:
         predict_dataset_cls,
         engine_cls,
         patchcore_cls,
-        efficient_ad_cls,
+        padim_cls,
         tiler_callback_cls,
         upscale_mode_cls,
     ) = import_dependencies()
@@ -1217,6 +1242,7 @@ def main() -> None:
     image_size = resolve_image_size(args)
     if args.score_aggregation is None:
         args.score_aggregation = default_score_aggregation(args.model)
+    args.roi_mode = args.roi_mode or default_roi_mode(args.model)
     fixed_roi = validate_fixed_roi(args.fixed_roi)
     tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
 
@@ -1274,7 +1300,7 @@ def main() -> None:
     ):
         d.mkdir(parents=True, exist_ok=True)
 
-    model = build_model_from_args(args, patchcore_cls, efficient_ad_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, padim_cls, image_size)
     configure_score_mode(model, args.score_mode)
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
     precision_flag = "16-true" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
@@ -1488,8 +1514,9 @@ def main() -> None:
         "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
         "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
         "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
-        "efficientad_imagenet_dir": str(args.efficientad_imagenet_dir) if args.model == "efficientad" else None,
-        "efficientad_model_size": args.efficientad_model_size if args.model == "efficientad" else None,
+        "padim_backbone": args.padim_backbone if args.model == "padim" else None,
+        "padim_layers": list(validate_padim_args(args)) if args.model == "padim" else None,
+        "padim_n_features": args.padim_n_features if args.model == "padim" else None,
         "score_mode": args.score_mode,
         "score_aggregation": args.score_aggregation,
         "score_percentile": args.score_percentile,
@@ -1525,8 +1552,10 @@ def main() -> None:
         print(f"[INFO] Layers     : {','.join(validate_patchcore_args(args))}")
         print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
         print(f"[INFO] Precision  : {args.patchcore_precision}")
-    if args.model == "efficientad":
-        print(f"[INFO] Model size : {args.efficientad_model_size}")
+    if args.model == "padim":
+        print(f"[INFO] Backbone   : {args.padim_backbone}")
+        print(f"[INFO] Layers     : {','.join(validate_padim_args(args))}")
+        print(f"[INFO] Features   : {args.padim_n_features}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
     if args.score_aggregation in {"blob-count", "blob-score"}:

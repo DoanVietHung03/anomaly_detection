@@ -23,10 +23,9 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
-DEFAULT_EFFICIENTAD_IMAGENET_DIR = Path("./datasets/imagenette")
-DEFAULT_EFFICIENTAD_MODEL_SIZE = "small"
-DEFAULT_EFFICIENTAD_LR = 1e-4
-DEFAULT_EFFICIENTAD_WEIGHT_DECAY = 1e-5
+DEFAULT_PADIM_BACKBONE = "resnet18"
+DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
+DEFAULT_PADIM_N_FEATURES = 100
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
 SCORE_AGGREGATION_CHOICES = (
@@ -70,7 +69,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "efficientad"],
+        choices=["patchcore", "padim"],
         help="Model architecture to train and run.",
     )
     parser.add_argument("--results-dir", type=Path, default=None, help="Training output directory.")
@@ -132,28 +131,22 @@ def parse_args() -> argparse.Namespace:
         help="PatchCore compute precision. float16 is the memory-safe default; use float32 only if memory allows.",
     )
     parser.add_argument(
-        "--efficientad-imagenet-dir",
-        type=Path,
-        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
-        help="ImageNette directory used by EfficientAD. Anomalib downloads it here if missing.",
+        "--padim-backbone",
+        default=DEFAULT_PADIM_BACKBONE,
+        help="PaDiM feature backbone. resnet18 is the real-time friendly default.",
     )
     parser.add_argument(
-        "--efficientad-model-size",
-        choices=["small", "medium"],
-        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
-        help="EfficientAD model size. small is faster/lighter; medium may improve quality at higher memory cost.",
+        "--padim-layers",
+        nargs="+",
+        default=list(DEFAULT_PADIM_LAYERS),
+        choices=["layer1", "layer2", "layer3", "layer4"],
+        help="PaDiM feature layers. layer1+layer2+layer3 is the balanced default.",
     )
     parser.add_argument(
-        "--efficientad-lr",
-        type=float,
-        default=DEFAULT_EFFICIENTAD_LR,
-        help="EfficientAD learning rate.",
-    )
-    parser.add_argument(
-        "--efficientad-weight-decay",
-        type=float,
-        default=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
-        help="EfficientAD weight decay.",
+        "--padim-n-features",
+        type=int,
+        default=DEFAULT_PADIM_N_FEATURES,
+        help="PaDiM retained feature dimensions. 100 matches the resnet18 paper default and is A4000-friendly.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
     parser.add_argument(
@@ -196,8 +189,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--roi-mode",
         choices=ROI_MODE_CHOICES,
-        default="fixed-foreground",
-        help="Restrict inference score aggregation to a fixed can ROI, foreground mask, both, or the full image.",
+        default=None,
+        help="Restrict inference score aggregation. Defaults to foreground for PaDiM and fixed-foreground for PatchCore.",
     )
     parser.add_argument(
         "--fixed-roi",
@@ -211,7 +204,7 @@ def parse_args() -> argparse.Namespace:
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
         default=None,
-        help="Image score aggregation used by infer_demo.py. Defaults to model for EfficientAD and pixel-mean for PatchCore.",
+        help="Image score aggregation used by infer_demo.py. Defaults to pixel-percentile for PaDiM and pixel-mean for PatchCore.",
     )
     parser.add_argument(
         "--calibration-objective",
@@ -269,11 +262,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def default_epochs(model: str) -> int:
-    return 30 if model == "efficientad" else 1
+    return 1
 
 
 def default_score_aggregation(model: str) -> str:
-    return "model" if model == "efficientad" else "pixel-mean"
+    return "pixel-percentile" if model == "padim" else "pixel-mean"
+
+
+def default_roi_mode(model: str) -> str:
+    return "foreground" if model == "padim" else "fixed-foreground"
+
+
+def default_train_batch_size(model: str) -> int:
+    return 8 if model == "padim" else 1
 
 
 def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
@@ -442,26 +443,23 @@ def main() -> None:
     input_dir = project_path(args.input_dir, project_root)
     calibration_dir = project_path(args.calibration_dir, project_root)
     output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}"), project_root)
-    efficientad_imagenet_dir = project_path(args.efficientad_imagenet_dir, project_root)
     image_size = resolve_image_size(args)
+    args.roi_mode = args.roi_mode or default_roi_mode(args.model)
     fixed_roi = validate_fixed_roi(args.fixed_roi)
     if args.score_blob_min_area <= 0:
         raise SystemExit("--score-blob-min-area must be a positive integer.")
     if args.score_blob_area_weight < 0.0:
         raise SystemExit("--score-blob-area-weight must be non-negative.")
-    if args.efficientad_lr <= 0.0:
-        raise SystemExit("--efficientad-lr must be positive.")
-    if args.efficientad_weight_decay < 0.0:
-        raise SystemExit("--efficientad-weight-decay must be non-negative.")
+    if args.padim_n_features <= 0:
+        raise SystemExit("--padim-n-features must be a positive integer.")
     epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
     score_aggregation = args.score_aggregation or default_score_aggregation(args.model)
-    default_batch_size = 1
+    default_batch_size = default_train_batch_size(args.model)
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
     demo_variants = args.demo_variants if args.demo_variants is not None else args.test_variant
     calibration_variants = args.calibration_variants if args.calibration_variants is not None else demo_variants
 
     args.dataset_root = dataset_root
-    args.efficientad_imagenet_dir = efficientad_imagenet_dir
     if not args.skip_checks:
         preflight(args)
     if args.check_only:
@@ -506,14 +504,12 @@ def main() -> None:
         str(args.patchcore_num_neighbors),
         "--patchcore-precision",
         args.patchcore_precision,
-        "--efficientad-imagenet-dir",
-        str(args.efficientad_imagenet_dir),
-        "--efficientad-model-size",
-        args.efficientad_model_size,
-        "--efficientad-lr",
-        str(args.efficientad_lr),
-        "--efficientad-weight-decay",
-        str(args.efficientad_weight_decay),
+        "--padim-backbone",
+        args.padim_backbone,
+        "--padim-layers",
+        *args.padim_layers,
+        "--padim-n-features",
+        str(args.padim_n_features),
         "--test-variant",
         *args.test_variant,
         "--accelerator",
@@ -613,10 +609,12 @@ def main() -> None:
         str(args.patchcore_num_neighbors),
         "--patchcore-precision",
         args.patchcore_precision,
-        "--efficientad-imagenet-dir",
-        str(args.efficientad_imagenet_dir),
-        "--efficientad-model-size",
-        args.efficientad_model_size,
+        "--padim-backbone",
+        args.padim_backbone,
+        "--padim-layers",
+        *args.padim_layers,
+        "--padim-n-features",
+        str(args.padim_n_features),
         "--roi-mode",
         args.roi_mode,
         "--fixed-roi",
