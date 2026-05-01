@@ -26,6 +26,9 @@ DEFAULT_PATCHCORE_PRECISION = "float16"
 DEFAULT_PADIM_BACKBONE = "resnet18"
 DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
 DEFAULT_PADIM_N_FEATURES = 100
+DEFAULT_FASTFLOW_BACKBONE = "resnet18"
+DEFAULT_FASTFLOW_FLOW_STEPS = 8
+DEFAULT_FASTFLOW_HIDDEN_RATIO = 1.0
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
 SCORE_AGGREGATION_CHOICES = (
@@ -69,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "padim"],
+        choices=["patchcore", "padim", "fastflow"],
         help="Model architecture to train and run.",
     )
     parser.add_argument("--results-dir", type=Path, default=None, help="Training output directory.")
@@ -147,6 +150,28 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_PADIM_N_FEATURES,
         help="PaDiM retained feature dimensions. 100 matches the resnet18 paper default and is A4000-friendly.",
+    )
+    parser.add_argument(
+        "--fastflow-backbone",
+        default=DEFAULT_FASTFLOW_BACKBONE,
+        help="FastFlow feature backbone. resnet18 is the A4000-friendly default.",
+    )
+    parser.add_argument(
+        "--fastflow-flow-steps",
+        type=int,
+        default=DEFAULT_FASTFLOW_FLOW_STEPS,
+        help="FastFlow normalizing-flow steps.",
+    )
+    parser.add_argument(
+        "--fastflow-conv3x3-only",
+        action="store_true",
+        help="Use only 3x3 convolutions in FastFlow coupling blocks.",
+    )
+    parser.add_argument(
+        "--fastflow-hidden-ratio",
+        type=float,
+        default=DEFAULT_FASTFLOW_HIDDEN_RATIO,
+        help="FastFlow hidden channel ratio.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
     parser.add_argument(
@@ -262,19 +287,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def default_epochs(model: str) -> int:
+    if model == "fastflow":
+        return 50
     return 1
 
 
 def default_score_aggregation(model: str) -> str:
-    return "pixel-percentile" if model == "padim" else "pixel-mean"
+    if model == "padim":
+        return "pixel-percentile"
+    if model == "fastflow":
+        return "model"
+    return "pixel-mean"
 
 
 def default_roi_mode(model: str) -> str:
-    return "foreground" if model == "padim" else "fixed-foreground"
+    return "foreground" if model in {"padim", "fastflow"} else "fixed-foreground"
 
 
 def default_train_batch_size(model: str) -> int:
-    return 8 if model == "padim" else 1
+    return 8 if model in {"padim", "fastflow"} else 1
 
 
 def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
@@ -452,6 +483,10 @@ def main() -> None:
         raise SystemExit("--score-blob-area-weight must be non-negative.")
     if args.padim_n_features <= 0:
         raise SystemExit("--padim-n-features must be a positive integer.")
+    if args.fastflow_flow_steps <= 0:
+        raise SystemExit("--fastflow-flow-steps must be a positive integer.")
+    if args.fastflow_hidden_ratio <= 0.0:
+        raise SystemExit("--fastflow-hidden-ratio must be positive.")
     epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
     score_aggregation = args.score_aggregation or default_score_aggregation(args.model)
     default_batch_size = default_train_batch_size(args.model)
@@ -510,6 +545,12 @@ def main() -> None:
         *args.padim_layers,
         "--padim-n-features",
         str(args.padim_n_features),
+        "--fastflow-backbone",
+        args.fastflow_backbone,
+        "--fastflow-flow-steps",
+        str(args.fastflow_flow_steps),
+        "--fastflow-hidden-ratio",
+        str(args.fastflow_hidden_ratio),
         "--test-variant",
         *args.test_variant,
         "--accelerator",
@@ -521,6 +562,8 @@ def main() -> None:
     ]
     if args.tile_stride is not None:
         train_command.extend(["--tile-stride", str(args.tile_stride)])
+    if args.fastflow_conv3x3_only:
+        train_command.append("--fastflow-conv3x3-only")
     run(train_command, project_root)
 
     calibration_manifest = calibration_dir / "manifest.json"
@@ -615,6 +658,12 @@ def main() -> None:
         *args.padim_layers,
         "--padim-n-features",
         str(args.padim_n_features),
+        "--fastflow-backbone",
+        args.fastflow_backbone,
+        "--fastflow-flow-steps",
+        str(args.fastflow_flow_steps),
+        "--fastflow-hidden-ratio",
+        str(args.fastflow_hidden_ratio),
         "--roi-mode",
         args.roi_mode,
         "--fixed-roi",
@@ -646,6 +695,8 @@ def main() -> None:
     ]
     if args.tile_stride is not None:
         infer_command.extend(["--tile-stride", str(args.tile_stride)])
+    if args.fastflow_conv3x3_only:
+        infer_command.append("--fastflow-conv3x3-only")
     if use_calibration and calibration_manifest.exists():
         infer_command.extend(["--calibration-path", str(calibration_dir)])
     run(infer_command, project_root)

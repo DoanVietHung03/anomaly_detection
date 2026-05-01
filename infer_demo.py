@@ -28,6 +28,9 @@ DEFAULT_PATCHCORE_PRECISION = "float16"
 DEFAULT_PADIM_BACKBONE = "resnet18"
 DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
 DEFAULT_PADIM_N_FEATURES = 100
+DEFAULT_FASTFLOW_BACKBONE = "resnet18"
+DEFAULT_FASTFLOW_FLOW_STEPS = 8
+DEFAULT_FASTFLOW_HIDDEN_RATIO = 1.0
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 DATASET_CHOICES = ("mvtec_ad2", "visa")
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
@@ -70,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "padim"],
+        choices=["patchcore", "padim", "fastflow"],
         help="Model architecture used by the checkpoint.",
     )
     parser.add_argument(
@@ -245,6 +248,28 @@ def parse_args() -> argparse.Namespace:
         help="PaDiM retained feature dimensions. Must match the trained checkpoint.",
     )
     parser.add_argument(
+        "--fastflow-backbone",
+        default=DEFAULT_FASTFLOW_BACKBONE,
+        help="FastFlow feature backbone. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--fastflow-flow-steps",
+        type=int,
+        default=DEFAULT_FASTFLOW_FLOW_STEPS,
+        help="FastFlow normalizing-flow steps. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--fastflow-conv3x3-only",
+        action="store_true",
+        help="Use only 3x3 convolutions in FastFlow coupling blocks. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--fastflow-hidden-ratio",
+        type=float,
+        default=DEFAULT_FASTFLOW_HIDDEN_RATIO,
+        help="FastFlow hidden channel ratio. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
         "--heatmap-normalization",
         choices=["global", "per-image"],
         default="global",
@@ -255,20 +280,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any]:
+def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     try:
         from anomalib.callbacks import TilerConfigurationCallback
         from anomalib.data import PredictDataset
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
-        from anomalib.models import Padim, Patchcore
+        from anomalib.models import Fastflow, Padim, Patchcore
     except Exception as exc:  # pragma: no cover - runtime safeguard
         raise SystemExit(
             "Failed to import Anomalib stack. Install dependencies first, for example:\n"
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return PredictDataset, Engine, Patchcore, Padim, TilerConfigurationCallback, ImageUpscaleMode
+    return PredictDataset, Engine, Patchcore, Padim, Fastflow, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def install_checkpoint_compatibility_aliases() -> None:
@@ -368,7 +393,7 @@ def build_tiling_callbacks(
     ]
 
 
-def build_model(model_name: str, patchcore_cls: Any, padim_cls: Any, image_size: tuple[int, int]) -> Any:
+def build_model(model_name: str, patchcore_cls: Any, padim_cls: Any, fastflow_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if model_name == "patchcore":
         return patchcore_cls(
@@ -386,6 +411,15 @@ def build_model(model_name: str, patchcore_cls: Any, padim_cls: Any, image_size:
             pre_trained=True,
             n_features=DEFAULT_PADIM_N_FEATURES,
             pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
+    if model_name == "fastflow":
+        return fastflow_cls(
+            backbone=DEFAULT_FASTFLOW_BACKBONE,
+            pre_trained=True,
+            flow_steps=DEFAULT_FASTFLOW_FLOW_STEPS,
+            conv3x3_only=False,
+            hidden_ratio=DEFAULT_FASTFLOW_HIDDEN_RATIO,
+            pre_processor=fastflow_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     raise ValueError(f"Unsupported model: {model_name}")
 
@@ -410,15 +444,32 @@ def validate_padim_args(args: argparse.Namespace) -> tuple[str, ...]:
     return layers
 
 
+def validate_fastflow_args(args: argparse.Namespace) -> None:
+    if args.fastflow_flow_steps <= 0:
+        raise SystemExit("--fastflow-flow-steps must be a positive integer.")
+    if args.fastflow_hidden_ratio <= 0.0:
+        raise SystemExit("--fastflow-hidden-ratio must be positive.")
+
+
 def default_score_aggregation(model_name: str) -> str:
-    return "pixel-percentile" if model_name == "padim" else "pixel-mean"
+    if model_name == "padim":
+        return "pixel-percentile"
+    if model_name == "fastflow":
+        return "model"
+    return "pixel-mean"
 
 
 def default_roi_mode(model_name: str) -> str:
-    return "foreground" if model_name == "padim" else "fixed-foreground"
+    return "foreground" if model_name in {"padim", "fastflow"} else "fixed-foreground"
 
 
-def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, padim_cls: Any, image_size: tuple[int, int]) -> Any:
+def build_model_from_args(
+    args: argparse.Namespace,
+    patchcore_cls: Any,
+    padim_cls: Any,
+    fastflow_cls: Any,
+    image_size: tuple[int, int],
+) -> Any:
     pre_processor_size = image_size
     if args.model == "patchcore":
         layers = validate_patchcore_args(args)
@@ -439,7 +490,17 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, padim_cl
             n_features=args.padim_n_features,
             pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
         )
-    return build_model(args.model, patchcore_cls, padim_cls, image_size)
+    if args.model == "fastflow":
+        validate_fastflow_args(args)
+        return fastflow_cls(
+            backbone=args.fastflow_backbone,
+            pre_trained=True,
+            flow_steps=args.fastflow_flow_steps,
+            conv3x3_only=args.fastflow_conv3x3_only,
+            hidden_ratio=args.fastflow_hidden_ratio,
+            pre_processor=fastflow_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
+    return build_model(args.model, patchcore_cls, padim_cls, fastflow_cls, image_size)
 
 
 def flatten_predictions(predictions: Any) -> list[Any]:
@@ -1235,6 +1296,7 @@ def main() -> None:
         engine_cls,
         patchcore_cls,
         padim_cls,
+        fastflow_cls,
         tiler_callback_cls,
         upscale_mode_cls,
     ) = import_dependencies()
@@ -1300,7 +1362,7 @@ def main() -> None:
     ):
         d.mkdir(parents=True, exist_ok=True)
 
-    model = build_model_from_args(args, patchcore_cls, padim_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, padim_cls, fastflow_cls, image_size)
     configure_score_mode(model, args.score_mode)
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
     precision_flag = "16-true" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
@@ -1517,6 +1579,10 @@ def main() -> None:
         "padim_backbone": args.padim_backbone if args.model == "padim" else None,
         "padim_layers": list(validate_padim_args(args)) if args.model == "padim" else None,
         "padim_n_features": args.padim_n_features if args.model == "padim" else None,
+        "fastflow_backbone": args.fastflow_backbone if args.model == "fastflow" else None,
+        "fastflow_flow_steps": args.fastflow_flow_steps if args.model == "fastflow" else None,
+        "fastflow_conv3x3_only": args.fastflow_conv3x3_only if args.model == "fastflow" else None,
+        "fastflow_hidden_ratio": args.fastflow_hidden_ratio if args.model == "fastflow" else None,
         "score_mode": args.score_mode,
         "score_aggregation": args.score_aggregation,
         "score_percentile": args.score_percentile,
@@ -1556,6 +1622,12 @@ def main() -> None:
         print(f"[INFO] Backbone   : {args.padim_backbone}")
         print(f"[INFO] Layers     : {','.join(validate_padim_args(args))}")
         print(f"[INFO] Features   : {args.padim_n_features}")
+    if args.model == "fastflow":
+        validate_fastflow_args(args)
+        print(f"[INFO] Backbone   : {args.fastflow_backbone}")
+        print(f"[INFO] Flow steps : {args.fastflow_flow_steps}")
+        print(f"[INFO] Conv3x3    : {args.fastflow_conv3x3_only}")
+        print(f"[INFO] Hidden     : {args.fastflow_hidden_ratio}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
     if args.score_aggregation in {"blob-count", "blob-score"}:

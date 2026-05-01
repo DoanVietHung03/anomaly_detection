@@ -114,6 +114,27 @@ python train_demo.py \
 
 > Ghi chú: PaDiM không train optimizer dài; nó fit Gaussian trên feature normal nên thường chạy 1 epoch.
 
+### FastFlow (trainable real-time candidate)
+
+```bash
+python train_demo.py \
+  --dataset-root ./can \
+  --category can \
+  --model fastflow \
+  --results-dir ./runs_fastflow \
+  --epochs 50 \
+  --image-size 384 \
+  --fastflow-backbone resnet18 \
+  --fastflow-flow-steps 8 \
+  --fastflow-hidden-ratio 1.0 \
+  --train-batch-size 8 \
+  --eval-batch-size 8 \
+  --accelerator gpu \
+  --devices 1
+```
+
+> Note: FastFlow trains a normalizing-flow head, so it needs more epochs than PaDiM/PatchCore.
+
 ### Chẩn đoán theo biến thể ảnh
 
 Trong bộ `can` này, `train/good` và `validation/good` chỉ có ảnh `regular`, nhưng `test_public/good` có thêm `overexposed`, `underexposed`, `shift_1`, `shift_2`, `shift_3`. Với one-class anomaly detection, các biến thể này có thể bị xem là anomaly dù nhãn là good.
