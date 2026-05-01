@@ -29,7 +29,7 @@ FOLDER_PATTERNS = [
 ]
 
 # Keep this False until you have confirmed the zip file exists and is downloadable.
-DELETE_SOURCE_FOLDERS_AFTER_ZIP = False
+DELETE_SOURCE_FOLDERS_AFTER_ZIP = True
 
 
 def find_folders() -> list[Path]:
