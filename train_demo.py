@@ -35,6 +35,10 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_EFFICIENTAD_IMAGENET_DIR = Path("./datasets/imagenette")
+DEFAULT_EFFICIENTAD_MODEL_SIZE = "small"
+DEFAULT_EFFICIENTAD_LR = 1e-4
+DEFAULT_EFFICIENTAD_WEIGHT_DECAY = 1e-5
 
 
 class SafeMVTecAD2(_MVTecAD2Base):
@@ -134,6 +138,30 @@ def parse_args() -> argparse.Namespace:
         choices=["float16", "float32"],
         default=DEFAULT_PATCHCORE_PRECISION,
         help="PatchCore compute precision. float16 is the memory-safe default; use float32 only if memory allows.",
+    )
+    parser.add_argument(
+        "--efficientad-imagenet-dir",
+        type=Path,
+        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+        help="ImageNette directory used by EfficientAD. Anomalib downloads it here if missing.",
+    )
+    parser.add_argument(
+        "--efficientad-model-size",
+        choices=["small", "medium"],
+        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
+        help="EfficientAD model size. small is faster/lighter; medium may improve quality at higher memory cost.",
+    )
+    parser.add_argument(
+        "--efficientad-lr",
+        type=float,
+        default=DEFAULT_EFFICIENTAD_LR,
+        help="EfficientAD learning rate.",
+    )
+    parser.add_argument(
+        "--efficientad-weight-decay",
+        type=float,
+        default=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
+        help="EfficientAD weight decay.",
     )
     parser.add_argument(
         "--test-type",
@@ -274,6 +302,10 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
         return model
     if model_name == "efficientad":
         return efficientad_cls(
+            imagenet_dir=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+            model_size=DEFAULT_EFFICIENTAD_MODEL_SIZE,
+            lr=DEFAULT_EFFICIENTAD_LR,
+            weight_decay=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
             pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     raise ValueError(f"Unsupported model: {model_name}")
@@ -303,6 +335,18 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficien
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
         )
         return model
+    if args.efficientad_lr <= 0.0:
+        raise SystemExit("--efficientad-lr must be positive.")
+    if args.efficientad_weight_decay < 0.0:
+        raise SystemExit("--efficientad-weight-decay must be non-negative.")
+    if args.model == "efficientad":
+        return efficientad_cls(
+            imagenet_dir=args.efficientad_imagenet_dir,
+            model_size=args.efficientad_model_size,
+            lr=args.efficientad_lr,
+            weight_decay=args.efficientad_weight_decay,
+            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
     return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
 
 
@@ -546,6 +590,10 @@ def main() -> None:
         print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
         print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
         print(f"[INFO] precision   : {args.patchcore_precision}")
+    if args.model == "efficientad":
+        print(f"[INFO] model_size  : {args.efficientad_model_size}")
+        print(f"[INFO] imagenette  : {args.efficientad_imagenet_dir}")
+        print(f"[INFO] lr          : {args.efficientad_lr}")
     if args.dataset != "visa":
         print(f"[INFO] test_type   : {args.test_type}")
         print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
@@ -592,6 +640,10 @@ def main() -> None:
         "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
         "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
         "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
+        "efficientad_imagenet_dir": args.efficientad_imagenet_dir if args.model == "efficientad" else None,
+        "efficientad_model_size": args.efficientad_model_size if args.model == "efficientad" else None,
+        "efficientad_lr": args.efficientad_lr if args.model == "efficientad" else None,
+        "efficientad_weight_decay": args.efficientad_weight_decay if args.model == "efficientad" else None,
         "train_batch_size": train_batch_size,
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,

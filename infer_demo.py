@@ -25,6 +25,8 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_EFFICIENTAD_IMAGENET_DIR = Path("./datasets/imagenette")
+DEFAULT_EFFICIENTAD_MODEL_SIZE = "small"
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 DATASET_CHOICES = ("mvtec_ad2", "visa")
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
@@ -140,8 +142,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
-        default="pixel-mean",
-        help="Image score aggregation. pixel/blob modes use ROI anomaly-map evidence instead of Anomalib's image score.",
+        default=None,
+        help="Image score aggregation. Defaults to model for EfficientAD and pixel-mean for PatchCore.",
     )
     parser.add_argument(
         "--score-percentile",
@@ -222,6 +224,18 @@ def parse_args() -> argparse.Namespace:
         choices=["float16", "float32"],
         default=DEFAULT_PATCHCORE_PRECISION,
         help="PatchCore compute precision. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--efficientad-imagenet-dir",
+        type=Path,
+        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+        help="ImageNette directory used by EfficientAD.",
+    )
+    parser.add_argument(
+        "--efficientad-model-size",
+        choices=["small", "medium"],
+        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
+        help="EfficientAD model size. Must match the trained checkpoint.",
     )
     parser.add_argument(
         "--heatmap-normalization",
@@ -360,6 +374,8 @@ def build_model(model_name: str, patchcore_cls: Any, efficientad_cls: Any, image
         )
     if model_name == "efficientad":
         return efficientad_cls(
+            imagenet_dir=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+            model_size=DEFAULT_EFFICIENTAD_MODEL_SIZE,
             pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     raise ValueError(f"Unsupported model: {model_name}")
@@ -376,6 +392,10 @@ def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
     return layers
 
 
+def default_score_aggregation(model_name: str) -> str:
+    return "model" if model_name == "efficientad" else "pixel-mean"
+
+
 def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficientad_cls: Any, image_size: tuple[int, int]) -> Any:
     pre_processor_size = image_size
     if args.model == "patchcore":
@@ -387,6 +407,12 @@ def build_model_from_args(args: argparse.Namespace, patchcore_cls: Any, efficien
             num_neighbors=args.patchcore_num_neighbors,
             precision=args.patchcore_precision,
             pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
+    if args.model == "efficientad":
+        return efficientad_cls(
+            imagenet_dir=args.efficientad_imagenet_dir,
+            model_size=args.efficientad_model_size,
+            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
         )
     return build_model(args.model, patchcore_cls, efficientad_cls, image_size)
 
@@ -1189,6 +1215,8 @@ def main() -> None:
     ) = import_dependencies()
     install_checkpoint_compatibility_aliases()
     image_size = resolve_image_size(args)
+    if args.score_aggregation is None:
+        args.score_aggregation = default_score_aggregation(args.model)
     fixed_roi = validate_fixed_roi(args.fixed_roi)
     tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
 
@@ -1460,6 +1488,8 @@ def main() -> None:
         "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
         "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
         "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
+        "efficientad_imagenet_dir": str(args.efficientad_imagenet_dir) if args.model == "efficientad" else None,
+        "efficientad_model_size": args.efficientad_model_size if args.model == "efficientad" else None,
         "score_mode": args.score_mode,
         "score_aggregation": args.score_aggregation,
         "score_percentile": args.score_percentile,
@@ -1495,6 +1525,8 @@ def main() -> None:
         print(f"[INFO] Layers     : {','.join(validate_patchcore_args(args))}")
         print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
         print(f"[INFO] Precision  : {args.patchcore_precision}")
+    if args.model == "efficientad":
+        print(f"[INFO] Model size : {args.efficientad_model_size}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
     if args.score_aggregation in {"blob-count", "blob-score"}:
