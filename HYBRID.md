@@ -61,3 +61,32 @@ Important outputs:
 - `hybrid_outputs_visa_<category>/summary.json`: final metrics.
 - `hybrid_outputs_visa_<category>/test_predictions.csv`: per-image decisions and pixel metrics.
 - `hybrid_outputs_visa_<category>/test_visuals/`: predicted masks and overlays when `--save-test-maps` is used.
+
+## Post-processing sweep
+
+After a hybrid model is trained, you can re-run only scoring/post-processing without retraining U-Net or regenerating PatchCore maps:
+
+```bash
+python3 hybrid_demo.py \
+  --dataset-root ./VisA \
+  --category candle \
+  --maps-dir ./hybrid_maps_visa_candle_patchcore \
+  --output-dir ./hybrid_outputs_visa_candle_pp \
+  --hybrid-checkpoint ./hybrid_outputs_visa_candle/hybrid_unet_best.pt \
+  --eval-only \
+  --skip-prepare \
+  --skip-map-generation \
+  --image-size 384 \
+  --hybrid-batch-size 8 \
+  --num-workers 4 \
+  --accelerator gpu \
+  --devices 1 \
+  --postprocess-min-component-area 150 \
+  --postprocess-object-edge-ignore-px 8 \
+  --image-p99-weight 0.25 \
+  --image-threshold-min 0.006 \
+  --image-threshold-max 0.008 \
+  --save-test-maps
+```
+
+Use a separate `--output-dir` for sweeps so the previous summary and visualizations stay intact.

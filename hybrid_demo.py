@@ -94,8 +94,45 @@ def parse_args() -> argparse.Namespace:
         default="hybrid",
         help="How to convert predicted masks into image-level anomaly scores.",
     )
+    parser.add_argument(
+        "--image-p99-weight",
+        type=float,
+        default=0.25,
+        help="P99 contribution when --image-score-mode hybrid. Lower values reduce tiny high-score speckle false positives.",
+    )
     parser.add_argument("--image-area-weight", type=float, default=4.0)
     parser.add_argument("--image-blob-weight", type=float, default=8.0)
+    parser.add_argument(
+        "--postprocess-min-component-area",
+        type=int,
+        default=120,
+        help="Remove predicted mask components smaller than this area at 384x384, scaled to the active image size.",
+    )
+    parser.add_argument(
+        "--postprocess-object-edge-ignore-px",
+        type=int,
+        default=0,
+        help="Suppress predictions in a band around the detected object boundary. Useful for candle rim false positives.",
+    )
+    parser.add_argument(
+        "--image-threshold-min",
+        type=float,
+        default=None,
+        help="Optional lower bound for validation-selected image threshold, e.g. 0.006.",
+    )
+    parser.add_argument(
+        "--image-threshold-max",
+        type=float,
+        default=None,
+        help="Optional upper bound for validation-selected image threshold, e.g. 0.008.",
+    )
+    parser.add_argument(
+        "--hybrid-checkpoint",
+        type=Path,
+        default=None,
+        help="Existing hybrid_unet_best.pt to evaluate when --eval-only is used.",
+    )
+    parser.add_argument("--eval-only", action="store_true", help="Load --hybrid-checkpoint and only re-run post-processed metrics.")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--accelerator", choices=["auto", "cpu", "gpu", "cuda"], default="gpu")
     parser.add_argument("--devices", default="1", help="Kept for parity with existing scripts; hybrid uses one visible device.")
@@ -678,27 +715,131 @@ def estimate_pos_weight(samples: list[HybridSample], image_size: tuple[int, int]
     return float(min(max_pos_weight, max(1.0, neg / pos)))
 
 
-def largest_component_fraction(binary: Any) -> float:
+def scaled_component_area(min_component_area: int, shape: tuple[int, int]) -> int:
+    if min_component_area <= 0:
+        return 1
+    height, width = shape
+    scale = (height * width) / float(384 * 384)
+    return max(1, int(round(min_component_area * scale)))
+
+
+def foreground_edge_mask(rgb: Any, edge_ignore_px: int) -> Any:
     import cv2
     import numpy as np
 
-    binary = binary.astype(np.uint8)
-    if binary.max() == 0:
-        return 0.0
-    _, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    if len(stats) <= 1:
-        return 0.0
-    largest = int(stats[1:, cv2.CC_STAT_AREA].max())
-    return float(largest) / float(binary.size)
+    if edge_ignore_px <= 0 or rgb is None:
+        return None
+
+    rgb_arr = np.asarray(rgb)
+    if rgb_arr.ndim == 3 and rgb_arr.shape[0] in (3, 4):
+        rgb_arr = np.transpose(rgb_arr[:3], (1, 2, 0))
+    if rgb_arr.dtype != np.uint8:
+        rgb_arr = np.clip(rgb_arr, 0.0, 1.0)
+        rgb_arr = (rgb_arr * 255.0).astype(np.uint8)
+
+    gray = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, bright = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bright_mask = bright > 0
+    dark_mask = ~bright_mask
+
+    border = np.zeros_like(bright_mask, dtype=bool)
+    border_width = max(2, int(round(min(bright_mask.shape) * 0.03)))
+    border[:border_width, :] = True
+    border[-border_width:, :] = True
+    border[:, :border_width] = True
+    border[:, -border_width:] = True
+
+    bright_border = float(bright_mask[border].mean())
+    dark_border = float(dark_mask[border].mean())
+    foreground = bright_mask if bright_border < dark_border else dark_mask
+    coverage = float(foreground.mean())
+    if coverage < 0.02 or coverage > 0.90:
+        return None
+
+    kernel_small = np.ones((3, 3), dtype=np.uint8)
+    foreground_u8 = foreground.astype(np.uint8)
+    foreground_u8 = cv2.morphologyEx(foreground_u8, cv2.MORPH_OPEN, kernel_small)
+    foreground_u8 = cv2.morphologyEx(foreground_u8, cv2.MORPH_CLOSE, kernel_small, iterations=2)
+
+    kernel_size = max(1, int(edge_ignore_px) * 2 + 1)
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    eroded = cv2.erode(foreground_u8, kernel, iterations=1) > 0
+    dilated = cv2.dilate(foreground_u8, kernel, iterations=1) > 0
+    return dilated & ~eroded
 
 
-def image_score_from_prob(prob: Any, mask_threshold: float, mode: str, area_weight: float, blob_weight: float) -> tuple[float, float, float]:
+def filter_connected_components(binary: Any, min_area: int) -> tuple[Any, int, int, int]:
+    import cv2
+    import numpy as np
+
+    binary_u8 = np.asarray(binary, dtype=np.uint8)
+    if binary_u8.max() == 0:
+        return binary_u8.astype(bool), 0, 0, 0
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_u8, connectivity=8)
+    kept = np.zeros_like(binary_u8, dtype=bool)
+    component_count = 0
+    largest_area = 0
+    removed_area = 0
+    for label_idx in range(1, num_labels):
+        area = int(stats[label_idx, cv2.CC_STAT_AREA])
+        if area >= min_area:
+            kept[labels == label_idx] = True
+            component_count += 1
+            largest_area = max(largest_area, area)
+        else:
+            removed_area += area
+    return kept, component_count, largest_area, removed_area
+
+
+def postprocess_probability_mask(
+    prob: Any,
+    *,
+    mask_threshold: float,
+    min_component_area: int,
+    edge_ignore_px: int,
+    rgb: Any | None,
+) -> dict[str, Any]:
+    import numpy as np
+
+    prob_arr = np.asarray(prob, dtype=np.float32)
+    raw_mask = prob_arr >= mask_threshold
+    edge_mask = foreground_edge_mask(rgb, edge_ignore_px)
+    edge_suppressed_pixels = 0
+    if edge_mask is not None:
+        edge_suppressed_pixels = int(np.logical_and(raw_mask, edge_mask).sum())
+        raw_mask = raw_mask & ~edge_mask
+
+    effective_min_area = scaled_component_area(min_component_area, prob_arr.shape[:2])
+    processed_mask, component_count, largest_area, removed_area = filter_connected_components(raw_mask, effective_min_area)
+    area_fraction = float(processed_mask.mean())
+    largest_blob_fraction = float(largest_area) / float(processed_mask.size)
+    return {
+        "mask": processed_mask,
+        "raw_area_fraction": float((prob_arr >= mask_threshold).mean()),
+        "area_fraction": area_fraction,
+        "largest_blob_fraction": largest_blob_fraction,
+        "component_count": component_count,
+        "largest_component_area": largest_area,
+        "removed_small_area": removed_area,
+        "edge_suppressed_pixels": edge_suppressed_pixels,
+        "effective_min_component_area": effective_min_area,
+    }
+
+
+def image_score_from_prob(
+    prob: Any,
+    *,
+    mode: str,
+    p99_weight: float,
+    area_weight: float,
+    blob_weight: float,
+    area_fraction: float,
+    blob_fraction: float,
+) -> float:
     import numpy as np
 
     prob = np.asarray(prob, dtype=np.float32)
-    binary = prob >= mask_threshold
-    area_fraction = float(binary.mean())
-    blob_fraction = largest_component_fraction(binary)
     max_score = float(prob.max())
     p99 = float(np.percentile(prob, 99.0))
     if mode == "max":
@@ -710,8 +851,8 @@ def image_score_from_prob(prob: Any, mask_threshold: float, mode: str, area_weig
     elif mode == "blob":
         score = blob_fraction
     else:
-        score = p99 + area_weight * area_fraction + blob_weight * blob_fraction
-    return float(score), area_fraction, blob_fraction
+        score = p99_weight * p99 + area_weight * area_fraction + blob_weight * blob_fraction
+    return float(score)
 
 
 def rank_auc(labels: list[int], scores: list[float]) -> float | None:
@@ -748,15 +889,33 @@ def threshold_candidates(scores: list[float]) -> list[float]:
     return sorted(candidates)
 
 
-def image_metrics(labels: list[int], scores: list[float], threshold: float | None = None) -> dict[str, Any]:
+def image_metrics(
+    labels: list[int],
+    scores: list[float],
+    threshold: float | None = None,
+    threshold_min: float | None = None,
+    threshold_max: float | None = None,
+) -> dict[str, Any]:
     if threshold is None:
         best: dict[str, Any] | None = None
-        for candidate in threshold_candidates(scores):
+        candidates = set(threshold_candidates(scores))
+        if threshold_min is not None:
+            candidates.add(float(threshold_min))
+        if threshold_max is not None:
+            candidates.add(float(threshold_max))
+        for candidate in sorted(candidates):
+            if threshold_min is not None and candidate < threshold_min:
+                continue
+            if threshold_max is not None and candidate > threshold_max:
+                continue
             metrics = image_metrics(labels, scores, candidate)
             score = (metrics["f1"], metrics["balanced_accuracy"], metrics["accuracy"])
             if best is None or score > (best["f1"], best["balanced_accuracy"], best["accuracy"]):
                 best = metrics
-        return best or image_metrics(labels, scores, 0.5)
+        if best is not None:
+            return best
+        fallback = threshold_min if threshold_min is not None else threshold_max
+        return image_metrics(labels, scores, 0.5 if fallback is None else float(fallback))
 
     tp = fp = tn = fn = 0
     for label, score in zip(labels, scores):
@@ -819,8 +978,13 @@ def evaluate_model(
     mask_threshold: float,
     image_threshold: float | None,
     image_score_mode: str,
+    image_p99_weight: float,
     image_area_weight: float,
     image_blob_weight: float,
+    postprocess_min_component_area: int,
+    postprocess_object_edge_ignore_px: int,
+    image_threshold_min: float | None,
+    image_threshold_max: float | None,
     save_dir: Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     import cv2
@@ -842,16 +1006,25 @@ def evaluate_model(
 
     with torch.no_grad():
         for batch in loader:
-            x = batch["x"].to(device, non_blocking=True)
+            x_cpu = batch["x"]
+            x = x_cpu.to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
             probs = torch.sigmoid(model(x)).cpu().numpy()[:, 0]
             targets = target.cpu().numpy()[:, 0]
+            rgbs = x_cpu[:, :3].cpu().numpy()
             batch_labels = batch["label"].cpu().numpy().astype(int).tolist()
             names = list(batch["name"])
             image_paths = list(batch["image_path"])
 
             for idx, prob in enumerate(probs):
-                pred_mask = prob >= mask_threshold
+                post = postprocess_probability_mask(
+                    prob,
+                    mask_threshold=mask_threshold,
+                    min_component_area=postprocess_min_component_area,
+                    edge_ignore_px=postprocess_object_edge_ignore_px,
+                    rgb=rgbs[idx],
+                )
+                pred_mask = post["mask"]
                 gt_mask = targets[idx] >= 0.5
                 tp, fp, fn = pixel_stats(pred_mask, gt_mask)
                 global_tp += tp
@@ -859,12 +1032,16 @@ def evaluate_model(
                 global_fn += fn
                 dice = safe_dice(tp, fp, fn)
                 iou = safe_iou(tp, fp, fn)
-                score, area_fraction, blob_fraction = image_score_from_prob(
+                area_fraction = float(post["area_fraction"])
+                blob_fraction = float(post["largest_blob_fraction"])
+                score = image_score_from_prob(
                     prob,
-                    mask_threshold,
-                    image_score_mode,
-                    image_area_weight,
-                    image_blob_weight,
+                    mode=image_score_mode,
+                    p99_weight=image_p99_weight,
+                    area_weight=image_area_weight,
+                    blob_weight=image_blob_weight,
+                    area_fraction=area_fraction,
+                    blob_fraction=blob_fraction,
                 )
                 label = int(batch_labels[idx])
                 pred_label = "" if image_threshold is None else int(score >= image_threshold)
@@ -898,8 +1075,14 @@ def evaluate_model(
                         "image_score": score,
                         "mask_threshold": mask_threshold,
                         "image_threshold": "" if image_threshold is None else image_threshold,
+                        "raw_area_fraction": post["raw_area_fraction"],
                         "pred_area_fraction": area_fraction,
                         "largest_blob_fraction": blob_fraction,
+                        "component_count": post["component_count"],
+                        "largest_component_area": post["largest_component_area"],
+                        "removed_small_area": post["removed_small_area"],
+                        "edge_suppressed_pixels": post["edge_suppressed_pixels"],
+                        "effective_min_component_area": post["effective_min_component_area"],
                         "pixel_dice": dice,
                         "pixel_iou": iou,
                         "pred_mask_rel": pred_mask_rel,
@@ -907,11 +1090,23 @@ def evaluate_model(
                     },
                 )
 
-    image_report = image_metrics(labels, scores, image_threshold) if labels else {}
+    image_report = (
+        image_metrics(labels, scores, image_threshold, image_threshold_min, image_threshold_max)
+        if labels
+        else {}
+    )
     report = {
         "num_samples": len(labels),
         "mask_threshold": mask_threshold,
         "image_threshold": image_threshold,
+        "image_score_mode": image_score_mode,
+        "image_p99_weight": image_p99_weight,
+        "image_area_weight": image_area_weight,
+        "image_blob_weight": image_blob_weight,
+        "postprocess_min_component_area": postprocess_min_component_area,
+        "postprocess_object_edge_ignore_px": postprocess_object_edge_ignore_px,
+        "image_threshold_min": image_threshold_min,
+        "image_threshold_max": image_threshold_max,
         "pixel_dice_global": safe_dice(global_tp, global_fp, global_fn),
         "pixel_iou_global": safe_iou(global_tp, global_fp, global_fn),
         "pixel_dice_mean_image": float(np.mean(per_image_dice)) if per_image_dice else None,
@@ -977,12 +1172,34 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def load_torch_checkpoint(path: Path, device: Any) -> dict[str, Any]:
+    import torch
+
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
+def evaluate_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "image_score_mode": args.image_score_mode,
+        "image_p99_weight": args.image_p99_weight,
+        "image_area_weight": args.image_area_weight,
+        "image_blob_weight": args.image_blob_weight,
+        "postprocess_min_component_area": args.postprocess_min_component_area,
+        "postprocess_object_edge_ignore_px": args.postprocess_object_edge_ignore_px,
+        "image_threshold_min": args.image_threshold_min,
+        "image_threshold_max": args.image_threshold_max,
+    }
+
+
 def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], maps_dir: Path, output_dir: Path) -> dict[str, Any]:
     import numpy as np
     import torch
     from torch import nn
 
-    if args.clean and output_dir.exists():
+    if args.clean and output_dir.exists() and not args.eval_only:
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -996,9 +1213,21 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     train_samples = load_hybrid_samples(maps_dir / "train", "train")
     val_samples = load_hybrid_samples(maps_dir / "val", "val")
     test_samples = load_hybrid_samples(maps_dir / "test", "test")
-    map_range = compute_map_range(train_samples)
     device = choose_device(args.accelerator)
     use_amp = bool(device.type == "cuda" and not args.no_amp)
+    checkpoint: dict[str, Any] | None = None
+    best_path = args.hybrid_checkpoint or (output_dir / "hybrid_unet_best.pt")
+    if args.eval_only:
+        if not best_path.exists():
+            raise SystemExit(f"Hybrid checkpoint not found for --eval-only: {best_path}")
+        checkpoint = load_torch_checkpoint(best_path, device)
+        if "image_size" in checkpoint:
+            image_size = tuple(int(v) for v in checkpoint["image_size"])
+        map_range = tuple(float(v) for v in checkpoint.get("map_range", compute_map_range(train_samples)))
+        base_channels = int(checkpoint.get("base_channels", args.base_channels))
+    else:
+        map_range = compute_map_range(train_samples)
+        base_channels = args.base_channels
 
     train_loader = make_dataloader(
         train_samples,
@@ -1037,7 +1266,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         augment=False,
     )
 
-    model = build_unet(in_channels=4, base_channels=args.base_channels).to(device)
+    model = build_unet(in_channels=4, base_channels=base_channels).to(device)
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model_state_dict"])
+
     pos_weight = estimate_pos_weight(train_samples, image_size, args.max_pos_weight)
     bce_loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=device))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -1048,11 +1280,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     best_score = -math.inf
-    best_path = output_dir / "hybrid_unet_best.pt"
     history: list[dict[str, Any]] = []
 
     print("=" * 80)
-    print("[INFO] Hybrid U-Net training")
+    print("[INFO] Hybrid U-Net evaluation" if args.eval_only else "[INFO] Hybrid U-Net training")
     print(f"[INFO] Device       : {device}")
     print(f"[INFO] AMP          : {use_amp}")
     print(f"[INFO] Image size   : {image_size[0]}x{image_size[1]}")
@@ -1063,67 +1294,63 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     print(f"[INFO] Pos weight   : {pos_weight:.3f}")
     print("=" * 80)
 
-    for epoch in range(1, args.hybrid_epochs + 1):
-        train_loss = train_one_epoch(
-            model,
-            train_loader,
-            optimizer=optimizer,
-            scaler=scaler,
-            device=device,
-            bce_loss=bce_loss,
-            bce_weight=args.bce_weight,
-            dice_weight=args.dice_weight,
-            use_amp=use_amp,
-        )
-        scheduler.step()
-        val_report, _ = evaluate_model(
-            model,
-            val_loader,
-            device=device,
-            mask_threshold=0.5,
-            image_threshold=None,
-            image_score_mode=args.image_score_mode,
-            image_area_weight=args.image_area_weight,
-            image_blob_weight=args.image_blob_weight,
-        )
-        val_image = val_report["image"]
-        val_score = float(val_report["pixel_dice_global"]) + float(val_image["f1"])
-        row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_pixel_dice": val_report["pixel_dice_global"],
-            "val_pixel_iou": val_report["pixel_iou_global"],
-            "val_image_f1": val_image["f1"],
-            "val_image_acc": val_image["accuracy"],
-            "val_image_auc": val_image["auc"],
-        }
-        history.append(row)
-        print(
-            f"[EPOCH {epoch:03d}] loss={train_loss:.4f} "
-            f"val_dice={float(row['val_pixel_dice']):.4f} "
-            f"val_img_f1={float(row['val_image_f1']):.4f} "
-            f"val_acc={float(row['val_image_acc']):.4f}",
-            flush=True,
-        )
-        if val_score > best_score:
-            best_score = val_score
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "image_size": image_size,
-                    "map_range": map_range,
-                    "base_channels": args.base_channels,
-                    "pos_weight": pos_weight,
-                    "args": vars(args),
-                },
-                best_path,
+    if not args.eval_only:
+        for epoch in range(1, args.hybrid_epochs + 1):
+            train_loss = train_one_epoch(
+                model,
+                train_loader,
+                optimizer=optimizer,
+                scaler=scaler,
+                device=device,
+                bce_loss=bce_loss,
+                bce_weight=args.bce_weight,
+                dice_weight=args.dice_weight,
+                use_amp=use_amp,
             )
+            scheduler.step()
+            val_report, _ = evaluate_model(
+                model,
+                val_loader,
+                device=device,
+                mask_threshold=0.5,
+                image_threshold=None,
+                **evaluate_kwargs(args),
+            )
+            val_image = val_report["image"]
+            val_score = float(val_report["pixel_dice_global"]) + float(val_image["f1"])
+            row = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_pixel_dice": val_report["pixel_dice_global"],
+                "val_pixel_iou": val_report["pixel_iou_global"],
+                "val_image_f1": val_image["f1"],
+                "val_image_acc": val_image["accuracy"],
+                "val_image_auc": val_image["auc"],
+            }
+            history.append(row)
+            print(
+                f"[EPOCH {epoch:03d}] loss={train_loss:.4f} "
+                f"val_dice={float(row['val_pixel_dice']):.4f} "
+                f"val_img_f1={float(row['val_image_f1']):.4f} "
+                f"val_acc={float(row['val_image_acc']):.4f}",
+                flush=True,
+            )
+            if val_score > best_score:
+                best_score = val_score
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "image_size": image_size,
+                        "map_range": map_range,
+                        "base_channels": base_channels,
+                        "pos_weight": pos_weight,
+                        "args": vars(args),
+                    },
+                    best_path,
+                )
 
-    try:
-        checkpoint = torch.load(best_path, map_location=device, weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(best_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+        checkpoint = load_torch_checkpoint(best_path, device)
+        model.load_state_dict(checkpoint["model_state_dict"])
 
     best_mask_threshold = 0.5
     best_mask_score = -math.inf
@@ -1134,9 +1361,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             device=device,
             mask_threshold=float(candidate),
             image_threshold=None,
-            image_score_mode=args.image_score_mode,
-            image_area_weight=args.image_area_weight,
-            image_blob_weight=args.image_blob_weight,
+            **evaluate_kwargs(args),
         )
         score = float(report["pixel_dice_global"])
         if score > best_mask_score:
@@ -1149,9 +1374,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=None,
-        image_score_mode=args.image_score_mode,
-        image_area_weight=args.image_area_weight,
-        image_blob_weight=args.image_blob_weight,
+        **evaluate_kwargs(args),
     )
     image_threshold = float(val_report_for_threshold["image"]["threshold"])
 
@@ -1161,9 +1384,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=image_threshold,
-        image_score_mode=args.image_score_mode,
-        image_area_weight=args.image_area_weight,
-        image_blob_weight=args.image_blob_weight,
+        **evaluate_kwargs(args),
     )
     val_report, val_rows = evaluate_model(
         model,
@@ -1171,9 +1392,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=image_threshold,
-        image_score_mode=args.image_score_mode,
-        image_area_weight=args.image_area_weight,
-        image_blob_weight=args.image_blob_weight,
+        **evaluate_kwargs(args),
     )
     test_save_dir = output_dir / "test_visuals" if args.save_test_maps else None
     test_report, test_rows = evaluate_model(
@@ -1182,9 +1401,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=image_threshold,
-        image_score_mode=args.image_score_mode,
-        image_area_weight=args.image_area_weight,
-        image_blob_weight=args.image_blob_weight,
+        **evaluate_kwargs(args),
         save_dir=test_save_dir,
     )
 
@@ -1202,6 +1419,15 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         "best_mask_threshold": best_mask_threshold,
         "image_threshold": image_threshold,
         "image_score_mode": args.image_score_mode,
+        "postprocessing": {
+            "image_p99_weight": args.image_p99_weight,
+            "image_area_weight": args.image_area_weight,
+            "image_blob_weight": args.image_blob_weight,
+            "min_component_area_384": args.postprocess_min_component_area,
+            "object_edge_ignore_px": args.postprocess_object_edge_ignore_px,
+            "image_threshold_min": args.image_threshold_min,
+            "image_threshold_max": args.image_threshold_max,
+        },
         "train": train_report,
         "val": val_report,
         "test": test_report,
@@ -1210,7 +1436,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print("=" * 80)
-    print("[INFO] Hybrid training done")
+    print("[INFO] Hybrid evaluation done" if args.eval_only else "[INFO] Hybrid training done")
     print(f"[INFO] Best checkpoint : {best_path}")
     print(f"[INFO] Mask threshold  : {best_mask_threshold:.3f}")
     print(f"[INFO] Image threshold : {image_threshold:.6f}")
@@ -1235,6 +1461,8 @@ def main() -> None:
     patchcore_results_dir = project_path(args.patchcore_results_dir, project_root)
     if args.patchcore_checkpoint is not None:
         args.patchcore_checkpoint = project_path(args.patchcore_checkpoint, project_root)
+    if args.hybrid_checkpoint is not None:
+        args.hybrid_checkpoint = project_path(args.hybrid_checkpoint, project_root)
 
     if args.train_bad <= 0 or args.val_bad <= 0 or args.test_bad <= 0:
         raise SystemExit("Hybrid supervised training needs bad samples in train/val/test.")
@@ -1246,6 +1474,18 @@ def main() -> None:
         raise SystemExit("--hybrid-batch-size must be positive.")
     if args.base_channels <= 0:
         raise SystemExit("--base-channels must be positive.")
+    if args.image_p99_weight < 0.0 or args.image_area_weight < 0.0 or args.image_blob_weight < 0.0:
+        raise SystemExit("Image score weights must be non-negative.")
+    if args.postprocess_min_component_area < 0:
+        raise SystemExit("--postprocess-min-component-area must be non-negative.")
+    if args.postprocess_object_edge_ignore_px < 0:
+        raise SystemExit("--postprocess-object-edge-ignore-px must be non-negative.")
+    if (
+        args.image_threshold_min is not None
+        and args.image_threshold_max is not None
+        and args.image_threshold_min > args.image_threshold_max
+    ):
+        raise SystemExit("--image-threshold-min must be <= --image-threshold-max.")
 
     if not args.skip_prepare:
         prepare_hybrid_split(args, split_dir)
