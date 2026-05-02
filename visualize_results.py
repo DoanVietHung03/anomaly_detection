@@ -4,6 +4,7 @@
 The dashboard intentionally does not require a new training run. It reads:
 - runs_*/train_summary_*.json for final test metrics
 - demo_outputs_*/predictions.csv for score distributions and confusion matrices
+- hybrid_outputs_*/summary.json + test_predictions.csv for hybrid PatchCore/U-Net runs
 """
 
 from __future__ import annotations
@@ -23,11 +24,20 @@ from typing import Any
 
 
 METRIC_KEYS = ("image_AUROC", "image_F1Score", "pixel_AUROC", "pixel_F1Score")
-TRAIN_METRIC_KEYS = ("train_loss", "train_st", "train_ae", "train_stae")
+TRAIN_METRIC_KEYS = (
+    "train_loss",
+    "train_st",
+    "train_ae",
+    "train_stae",
+    "val_pixel_dice",
+    "val_image_f1",
+    "val_image_acc",
+)
 MODEL_LABELS = {
     "patchcore": "PatchCore",
     "padim": "PaDiM",
     "fastflow": "FastFlow",
+    "hybrid_patchcore_unet": "Hybrid PatchCore + U-Net",
 }
 MODEL_COLORS = ("#0f766e", "#c2410c", "#2563eb", "#7c2d12", "#4338ca", "#15803d")
 GOOD_COLOR = "#0f766e"
@@ -57,6 +67,12 @@ class PredictionRow:
     raw_map_rel: str | None = None
     raw_float_map_rel: str | None = None
     roi_mask_rel: str | None = None
+    pred_mask_rel: str | None = None
+    pred_overlay_rel: str | None = None
+    pixel_dice: float | None = None
+    pixel_iou: float | None = None
+    pred_area_fraction: float | None = None
+    largest_blob_fraction: float | None = None
 
 
 @dataclass
@@ -78,10 +94,11 @@ def parse_args() -> argparse.Namespace:
         "--project-root",
         type=Path,
         default=Path(__file__).resolve().parent,
-        help="Project root containing runs_* and demo_outputs_* directories.",
+        help="Project root containing runs_*, demo_outputs_*, or hybrid_outputs_* directories.",
     )
     parser.add_argument("--runs-glob", default="runs_*", help="Glob for directories containing train summaries.")
     parser.add_argument("--demo-glob", default="demo_outputs_*", help="Glob for directories containing predictions.csv.")
+    parser.add_argument("--hybrid-glob", default="**/hybrid_outputs_*", help="Glob for hybrid output directories.")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -138,6 +155,21 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def extract_metrics(summary: dict[str, Any]) -> dict[str, float]:
+    if summary.get("model") == "hybrid_patchcore_unet" or "test" in summary:
+        test = summary.get("test") if isinstance(summary.get("test"), dict) else {}
+        image = test.get("image") if isinstance(test.get("image"), dict) else {}
+        metrics: dict[str, float] = {}
+        image_auc = safe_float(image.get("auc"))
+        image_f1 = safe_float(image.get("f1"))
+        pixel_dice = safe_float(test.get("pixel_dice_global"))
+        if image_auc is not None:
+            metrics["image_AUROC"] = image_auc
+        if image_f1 is not None:
+            metrics["image_F1Score"] = image_f1
+        if pixel_dice is not None:
+            metrics["pixel_F1Score"] = pixel_dice
+        return metrics
+
     test_results = summary.get("test_results")
     if isinstance(test_results, list) and test_results and isinstance(test_results[0], dict):
         source = test_results[0]
@@ -222,6 +254,31 @@ def load_train_summaries(project_root: Path, runs_glob: str) -> dict[str, ModelA
     return artifacts
 
 
+def load_hybrid_outputs(project_root: Path, hybrid_glob: str, artifacts: dict[str, ModelArtifacts]) -> None:
+    for directory in sorted(project_root.glob(hybrid_glob)):
+        if not directory.is_dir():
+            continue
+        summary_path = directory / "summary.json"
+        predictions_path = directory / "test_predictions.csv"
+        if not summary_path.exists() and not predictions_path.exists():
+            continue
+
+        summary = read_json(summary_path) if summary_path.exists() else {}
+        model = normalize_model_name(str(summary.get("model") or "hybrid_patchcore_unet"))
+        record = artifacts.setdefault(model, ModelArtifacts(model=model))
+        record.summary = summary
+        record.summary_path = summary_path if summary_path.exists() else None
+        record.category = str(summary.get("category") or record.category or "")
+        record.metrics = extract_metrics(summary)
+        history_path = directory / "history.csv"
+        if history_path.exists():
+            record.metrics_csv_path = history_path
+            record.training_metrics = read_training_metrics(history_path)
+        if predictions_path.exists():
+            record.predictions_path = predictions_path
+            record.predictions = read_predictions(predictions_path)
+
+
 def model_from_demo_dir(path: Path) -> str:
     metadata_path = path / "run_metadata.json"
     if metadata_path.exists():
@@ -242,6 +299,8 @@ def read_predictions(path: Path) -> list[PredictionRow]:
         reader = csv.DictReader(file)
         for raw in reader:
             score = safe_float(raw.get("pred_score"))
+            if score is None:
+                score = safe_float(raw.get("image_score"))
             if score is None:
                 continue
             gt_label = (raw.get("gt_label") or "").strip().lower() or None
@@ -267,6 +326,12 @@ def read_predictions(path: Path) -> list[PredictionRow]:
                     raw_map_rel=raw.get("raw_map_rel") or None,
                     raw_float_map_rel=raw.get("raw_float_map_rel") or None,
                     roi_mask_rel=raw.get("roi_mask_rel") or None,
+                    pred_mask_rel=raw.get("pred_mask_rel") or None,
+                    pred_overlay_rel=raw.get("pred_overlay_rel") or None,
+                    pixel_dice=safe_float(raw.get("pixel_dice")),
+                    pixel_iou=safe_float(raw.get("pixel_iou")),
+                    pred_area_fraction=safe_float(raw.get("pred_area_fraction")),
+                    largest_blob_fraction=safe_float(raw.get("largest_blob_fraction")),
                 ),
             )
     return rows
@@ -775,6 +840,8 @@ def prediction_artifact_href(record: ModelArtifacts, row: PredictionRow, field_n
     if not relative_value or record.predictions_path is None:
         return None
     path = record.predictions_path.parent / relative_value
+    if not path.exists() and field_name in {"pred_mask_rel", "pred_overlay_rel"}:
+        path = record.predictions_path.parent / "test_visuals" / relative_value
     if not path.exists():
         return None
     return os.path.relpath(path, output_dir).replace("\\", "/")
@@ -792,7 +859,9 @@ def render_image_gallery(record: ModelArtifacts, output_dir: Path, max_items: in
         roi_mask = prediction_artifact_href(record, row, "roi_mask_rel", output_dir)
         heatmap = prediction_artifact_href(record, row, "heatmap_rel", output_dir)
         overlay = prediction_artifact_href(record, row, "overlay_rel", output_dir)
-        if not any((original, gt_mask, gt_overlay, roi_mask, heatmap, overlay)):
+        pred_mask = prediction_artifact_href(record, row, "pred_mask_rel", output_dir)
+        pred_overlay = prediction_artifact_href(record, row, "pred_overlay_rel", output_dir)
+        if not any((original, gt_mask, gt_overlay, roi_mask, heatmap, overlay, pred_mask, pred_overlay)):
             continue
         image_blocks = []
         for label, href in (
@@ -802,6 +871,8 @@ def render_image_gallery(record: ModelArtifacts, output_dir: Path, max_items: in
             ("ROI Mask", roi_mask),
             ("Heatmap", heatmap),
             ("Pred Overlay", overlay),
+            ("Pred Mask", pred_mask),
+            ("Hybrid Overlay", pred_overlay),
         ):
             if href:
                 image_blocks.append(
@@ -817,6 +888,7 @@ def render_image_gallery(record: ModelArtifacts, output_dir: Path, max_items: in
             f"{' | Model ' + format_number(row.model_pred_score) if row.model_pred_score is not None else ''}"
             f"{' | ' + html.escape(row.score_aggregation) + '/' + html.escape(row.roi_mode or 'off') if row.score_aggregation else ''}"
             f"{' | Threshold ' + format_number(row.calibrated_threshold) if row.calibrated_threshold is not None else ''}</span>"
+            f"{'<span>Pixel Dice ' + format_number(row.pixel_dice) + ' | IoU ' + format_number(row.pixel_iou) + ' | Area ' + format_percent(row.pred_area_fraction) + ' | Blob ' + format_percent(row.largest_blob_fraction) + '</span>' if row.pixel_dice is not None else ''}"
             "</div>"
             f"<div class=\"sample-images\">{''.join(image_blocks)}</div>"
             "</article>",
@@ -931,7 +1003,7 @@ def render_model_panel(record: ModelArtifacts, project_root: Path, output_dir: P
       {render_confusion_matrix(record)}
     </div>
   </div>
-  <h4>Image, GT Mask, Heatmap, Overlay</h4>
+  <h4>Image Evidence</h4>
   {render_image_gallery(record, output_dir, max_gallery_items)}
 </section>
 """.strip()
@@ -1167,6 +1239,7 @@ def main() -> None:
 
     artifacts = load_train_summaries(project_root, args.runs_glob)
     load_predictions(project_root, args.demo_glob, artifacts)
+    load_hybrid_outputs(project_root, args.hybrid_glob, artifacts)
 
     records = sorted(
         artifacts.values(),
@@ -1174,7 +1247,8 @@ def main() -> None:
     )
     if not records:
         raise SystemExit(
-            "No artifacts found. Expected train_summary_*.json under runs_* or predictions.csv under demo_outputs_*.",
+            "No artifacts found. Expected train_summary_*.json under runs_*, "
+            "predictions.csv under demo_outputs_*, or summary.json/test_predictions.csv under hybrid_outputs_*.",
         )
 
     output_path.write_text(
