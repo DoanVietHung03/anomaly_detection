@@ -54,6 +54,48 @@ python3 hybrid_demo.py \
   --save-test-maps
 ```
 
+## Small-defect segmentation training
+
+If image-level post-processing still misses tiny defects, retrain only the U-Net stage with defect-centered crops,
+small-defect oversampling, and focal/Tversky losses. Reuse the existing PatchCore maps:
+
+```bash
+python3 hybrid_demo.py \
+  --dataset-root ./VisA \
+  --category candle \
+  --maps-dir ./hybrid_maps_visa_candle_patchcore \
+  --output-dir ./hybrid_outputs_visa_candle_small_defect \
+  --skip-prepare \
+  --skip-map-generation \
+  --image-size 384 \
+  --hybrid-epochs 60 \
+  --hybrid-batch-size 16 \
+  --num-workers 8 \
+  --accelerator gpu \
+  --devices 1 \
+  --hybrid-train-crop-size 256 \
+  --defect-crop-prob 0.85 \
+  --small-defect-oversample 3.0 \
+  --small-defect-area-threshold 600 \
+  --bce-weight 0.5 \
+  --dice-weight 1.0 \
+  --focal-weight 0.75 \
+  --focal-alpha 0.8 \
+  --focal-gamma 2.0 \
+  --tversky-weight 0.75 \
+  --tversky-alpha 0.3 \
+  --tversky-beta 0.7 \
+  --postprocess-min-component-area 60 \
+  --postprocess-object-edge-ignore-px 0 \
+  --image-p99-weight 0.25 \
+  --image-threshold-min 0.003 \
+  --image-threshold-max 0.006 \
+  --save-test-maps
+```
+
+If this uses too much VRAM, lower `--hybrid-batch-size` to `8`. The validation and test passes still use the full
+image size; crops affect only training batches.
+
 Important outputs:
 
 - `hybrid_inputs_visa_<category>/manifest.json`: supervised split manifest.

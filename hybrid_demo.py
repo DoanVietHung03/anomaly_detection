@@ -89,6 +89,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dice-weight", type=float, default=1.0)
     parser.add_argument("--max-pos-weight", type=float, default=30.0)
     parser.add_argument(
+        "--hybrid-train-crop-size",
+        type=int,
+        default=0,
+        help="Crop size used only for hybrid U-Net training. 0 keeps full-frame training.",
+    )
+    parser.add_argument(
+        "--defect-crop-prob",
+        type=float,
+        default=0.80,
+        help="Probability of centering a train crop on a positive mask pixel for bad samples.",
+    )
+    parser.add_argument(
+        "--small-defect-oversample",
+        type=float,
+        default=1.0,
+        help="Sampler multiplier for bad training samples whose mask area is below --small-defect-area-threshold.",
+    )
+    parser.add_argument(
+        "--small-defect-area-threshold",
+        type=int,
+        default=600,
+        help="Mask area threshold at 384x384 for treating a bad sample as a small defect.",
+    )
+    parser.add_argument("--focal-weight", type=float, default=0.0)
+    parser.add_argument("--focal-alpha", type=float, default=0.75)
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--tversky-weight", type=float, default=0.0)
+    parser.add_argument("--tversky-alpha", type=float, default=0.30)
+    parser.add_argument("--tversky-beta", type=float, default=0.70)
+    parser.add_argument(
         "--image-score-mode",
         choices=["max", "p99", "area", "blob", "hybrid"],
         default="hybrid",
@@ -551,6 +581,55 @@ def compute_map_range(samples: list[HybridSample]) -> tuple[float, float]:
     return low, high
 
 
+def sample_crop_bounds(mask: Any, crop_size: int, defect_crop_prob: float, label: int) -> tuple[int, int, int, int]:
+    import numpy as np
+
+    height, width = mask.shape[:2]
+    if crop_size <= 0 or (crop_size >= height and crop_size >= width):
+        return 0, height, 0, width
+    crop_h = min(crop_size, height)
+    crop_w = min(crop_size, width)
+
+    if label == 1 and random.random() < defect_crop_prob:
+        positive = np.argwhere(mask > 0.5)
+        if len(positive) > 0:
+            center_y, center_x = positive[random.randrange(len(positive))]
+            jitter_y = random.randint(-max(1, crop_h // 6), max(1, crop_h // 6))
+            jitter_x = random.randint(-max(1, crop_w // 6), max(1, crop_w // 6))
+            center_y = int(center_y) + jitter_y
+            center_x = int(center_x) + jitter_x
+            y1 = max(0, min(height - crop_h, center_y - crop_h // 2))
+            x1 = max(0, min(width - crop_w, center_x - crop_w // 2))
+            return y1, y1 + crop_h, x1, x1 + crop_w
+
+    y1 = random.randint(0, max(0, height - crop_h))
+    x1 = random.randint(0, max(0, width - crop_w))
+    return y1, y1 + crop_h, x1, x1 + crop_w
+
+
+def apply_train_crop(
+    rgb: Any,
+    anomaly: Any,
+    mask: Any,
+    *,
+    crop_size: int,
+    defect_crop_prob: float,
+    label: int,
+) -> tuple[Any, Any, Any]:
+    import numpy as np
+
+    y1, y2, x1, x2 = sample_crop_bounds(mask, crop_size, defect_crop_prob, label)
+    return (
+        np.ascontiguousarray(rgb[y1:y2, x1:x2]),
+        np.ascontiguousarray(anomaly[y1:y2, x1:x2]),
+        np.ascontiguousarray(mask[y1:y2, x1:x2]),
+    )
+
+
+def sample_mask_area(sample: HybridSample, image_size: tuple[int, int]) -> int:
+    return int(round(float(read_mask(sample.mask_path, image_size).sum())))
+
+
 class HybridMapDataset:
     def __init__(
         self,
@@ -559,11 +638,15 @@ class HybridMapDataset:
         image_size: tuple[int, int],
         map_range: tuple[float, float],
         augment: bool,
+        train_crop_size: int = 0,
+        defect_crop_prob: float = 0.0,
     ) -> None:
         self.samples = samples
         self.image_size = image_size
         self.map_low, self.map_high = map_range
         self.augment = augment
+        self.train_crop_size = train_crop_size
+        self.defect_crop_prob = defect_crop_prob
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -576,6 +659,16 @@ class HybridMapDataset:
         rgb = read_rgb(sample.image_path, self.image_size)
         anomaly = read_map(sample.map_path, self.image_size, self.map_low, self.map_high)
         mask = read_mask(sample.mask_path, self.image_size)
+
+        if self.train_crop_size > 0:
+            rgb, anomaly, mask = apply_train_crop(
+                rgb,
+                anomaly,
+                mask,
+                crop_size=self.train_crop_size,
+                defect_crop_prob=self.defect_crop_prob,
+                label=sample.label,
+            )
 
         if self.augment:
             if random.random() < 0.5:
@@ -606,11 +699,22 @@ def make_dataloader(
     num_workers: int,
     train: bool,
     augment: bool,
+    train_crop_size: int = 0,
+    defect_crop_prob: float = 0.0,
+    small_defect_oversample: float = 1.0,
+    small_defect_area_threshold: int = 600,
 ) -> Any:
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
 
-    dataset = HybridMapDataset(samples, image_size=image_size, map_range=map_range, augment=augment and train)
+    dataset = HybridMapDataset(
+        samples,
+        image_size=image_size,
+        map_range=map_range,
+        augment=augment and train,
+        train_crop_size=train_crop_size if train else 0,
+        defect_crop_prob=defect_crop_prob if train else 0.0,
+    )
     sampler = None
     shuffle = train
     if train:
@@ -618,6 +722,13 @@ def make_dataloader(
         good_count = max(1, labels.count(0))
         bad_count = max(1, labels.count(1))
         weights = [0.5 / bad_count if label == 1 else 0.5 / good_count for label in labels]
+        if small_defect_oversample > 1.0:
+            area_threshold = scaled_component_area(small_defect_area_threshold, image_size)
+            for idx, sample in enumerate(samples):
+                if sample.label == 1:
+                    area = sample_mask_area(sample, image_size)
+                    if 0 < area <= area_threshold:
+                        weights[idx] *= small_defect_oversample
         sampler = WeightedRandomSampler(torch.as_tensor(weights, dtype=torch.double), num_samples=len(weights), replacement=True)
         shuffle = False
     return DataLoader(
@@ -700,6 +811,29 @@ def dice_loss_from_logits(logits: Any, targets: Any, eps: float = 1e-6) -> Any:
     denominator = torch.sum(probs, dims) + torch.sum(targets, dims)
     dice = (2.0 * intersection + eps) / (denominator + eps)
     return 1.0 - dice.mean()
+
+
+def focal_loss_from_logits(logits: Any, targets: Any, alpha: float, gamma: float) -> Any:
+    import torch
+    import torch.nn.functional as F
+
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    probs = torch.sigmoid(logits)
+    p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+    alpha_t = alpha * targets + (1.0 - alpha) * (1.0 - targets)
+    return (alpha_t * torch.pow(1.0 - p_t, gamma) * bce).mean()
+
+
+def tversky_loss_from_logits(logits: Any, targets: Any, alpha: float, beta: float, eps: float = 1e-6) -> Any:
+    import torch
+
+    probs = torch.sigmoid(logits)
+    dims = (1, 2, 3)
+    true_pos = torch.sum(probs * targets, dims)
+    false_pos = torch.sum(probs * (1.0 - targets), dims)
+    false_neg = torch.sum((1.0 - probs) * targets, dims)
+    tversky = (true_pos + eps) / (true_pos + alpha * false_pos + beta * false_neg + eps)
+    return 1.0 - tversky.mean()
 
 
 def estimate_pos_weight(samples: list[HybridSample], image_size: tuple[int, int], max_pos_weight: float) -> float:
@@ -1129,6 +1263,12 @@ def train_one_epoch(
     bce_loss: Any,
     bce_weight: float,
     dice_weight: float,
+    focal_weight: float,
+    focal_alpha: float,
+    focal_gamma: float,
+    tversky_weight: float,
+    tversky_alpha: float,
+    tversky_beta: float,
     use_amp: bool,
 ) -> float:
     from contextlib import nullcontext
@@ -1146,6 +1286,10 @@ def train_one_epoch(
         with autocast_context:
             logits = model(x)
             loss = bce_weight * bce_loss(logits, target) + dice_weight * dice_loss_from_logits(logits, target)
+            if focal_weight > 0.0:
+                loss = loss + focal_weight * focal_loss_from_logits(logits, target, focal_alpha, focal_gamma)
+            if tversky_weight > 0.0:
+                loss = loss + tversky_weight * tversky_loss_from_logits(logits, target, tversky_alpha, tversky_beta)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -1173,12 +1317,25 @@ def write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def load_torch_checkpoint(path: Path, device: Any) -> dict[str, Any]:
+    import pathlib
+
     import torch
 
+    def _load() -> dict[str, Any]:
+        try:
+            return torch.load(path, map_location=device, weights_only=False)
+        except TypeError:
+            return torch.load(path, map_location=device)
+
+    if os.name != "nt":
+        return _load()
+
+    original_posix_path = pathlib.PosixPath
     try:
-        return torch.load(path, map_location=device, weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location=device)
+        pathlib.PosixPath = pathlib.WindowsPath  # type: ignore[misc,assignment]
+        return _load()
+    finally:
+        pathlib.PosixPath = original_posix_path  # type: ignore[misc,assignment]
 
 
 def evaluate_kwargs(args: argparse.Namespace) -> dict[str, Any]:
@@ -1237,6 +1394,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         num_workers=args.num_workers,
         train=True,
         augment=not args.no_augment,
+        train_crop_size=args.hybrid_train_crop_size,
+        defect_crop_prob=args.defect_crop_prob,
+        small_defect_oversample=args.small_defect_oversample,
+        small_defect_area_threshold=args.small_defect_area_threshold,
     )
     train_eval_loader = make_dataloader(
         train_samples,
@@ -1292,6 +1453,16 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     print(f"[INFO] Val samples  : {len(val_samples)}")
     print(f"[INFO] Test samples : {len(test_samples)}")
     print(f"[INFO] Pos weight   : {pos_weight:.3f}")
+    if not args.eval_only:
+        crop_text = "full-frame" if args.hybrid_train_crop_size <= 0 else f"{args.hybrid_train_crop_size}x{args.hybrid_train_crop_size}"
+        print(f"[INFO] Train crop   : {crop_text}")
+        print(f"[INFO] Defect crop p: {args.defect_crop_prob:.2f}")
+        print(f"[INFO] Small oversmp : {args.small_defect_oversample:.2f} below {args.small_defect_area_threshold}px@384")
+        print(
+            "[INFO] Loss weights : "
+            f"BCE={args.bce_weight:.2f}, Dice={args.dice_weight:.2f}, "
+            f"Focal={args.focal_weight:.2f}, Tversky={args.tversky_weight:.2f}",
+        )
     print("=" * 80)
 
     if not args.eval_only:
@@ -1305,6 +1476,12 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
                 bce_loss=bce_loss,
                 bce_weight=args.bce_weight,
                 dice_weight=args.dice_weight,
+                focal_weight=args.focal_weight,
+                focal_alpha=args.focal_alpha,
+                focal_gamma=args.focal_gamma,
+                tversky_weight=args.tversky_weight,
+                tversky_alpha=args.tversky_alpha,
+                tversky_beta=args.tversky_beta,
                 use_amp=use_amp,
             )
             scheduler.step()
@@ -1419,6 +1596,20 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         "best_mask_threshold": best_mask_threshold,
         "image_threshold": image_threshold,
         "image_score_mode": args.image_score_mode,
+        "training": {
+            "train_crop_size": args.hybrid_train_crop_size,
+            "defect_crop_prob": args.defect_crop_prob,
+            "small_defect_oversample": args.small_defect_oversample,
+            "small_defect_area_threshold_384": args.small_defect_area_threshold,
+            "bce_weight": args.bce_weight,
+            "dice_weight": args.dice_weight,
+            "focal_weight": args.focal_weight,
+            "focal_alpha": args.focal_alpha,
+            "focal_gamma": args.focal_gamma,
+            "tversky_weight": args.tversky_weight,
+            "tversky_alpha": args.tversky_alpha,
+            "tversky_beta": args.tversky_beta,
+        },
         "postprocessing": {
             "image_p99_weight": args.image_p99_weight,
             "image_area_weight": args.image_area_weight,
@@ -1474,6 +1665,24 @@ def main() -> None:
         raise SystemExit("--hybrid-batch-size must be positive.")
     if args.base_channels <= 0:
         raise SystemExit("--base-channels must be positive.")
+    if args.hybrid_train_crop_size < 0:
+        raise SystemExit("--hybrid-train-crop-size must be non-negative.")
+    if args.hybrid_train_crop_size > 0 and args.hybrid_train_crop_size < 64:
+        raise SystemExit("--hybrid-train-crop-size should be 0 or at least 64.")
+    if not 0.0 <= args.defect_crop_prob <= 1.0:
+        raise SystemExit("--defect-crop-prob must be between 0 and 1.")
+    if args.small_defect_oversample < 1.0:
+        raise SystemExit("--small-defect-oversample must be >= 1.")
+    if args.small_defect_area_threshold < 0:
+        raise SystemExit("--small-defect-area-threshold must be non-negative.")
+    if args.bce_weight < 0.0 or args.dice_weight < 0.0 or args.focal_weight < 0.0 or args.tversky_weight < 0.0:
+        raise SystemExit("Loss weights must be non-negative.")
+    if not 0.0 <= args.focal_alpha <= 1.0:
+        raise SystemExit("--focal-alpha must be between 0 and 1.")
+    if args.focal_gamma < 0.0:
+        raise SystemExit("--focal-gamma must be non-negative.")
+    if args.tversky_alpha < 0.0 or args.tversky_beta < 0.0:
+        raise SystemExit("--tversky-alpha and --tversky-beta must be non-negative.")
     if args.image_p99_weight < 0.0 or args.image_area_weight < 0.0 or args.image_blob_weight < 0.0:
         raise SystemExit("Image score weights must be non-negative.")
     if args.postprocess_min_component_area < 0:
