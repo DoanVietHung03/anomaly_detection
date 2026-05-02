@@ -14,6 +14,9 @@ calibration_inputs_*/
 dashboard_outputs/
 demo_inputs_*/
 demo_outputs_*/
+hybrid_inputs_*/
+hybrid_maps_*/
+hybrid_outputs_*/
 results/
 runs_*/
 zipped_output/
