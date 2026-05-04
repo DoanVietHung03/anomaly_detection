@@ -54,6 +54,12 @@ class PredictionRow:
     raw_pred_score: float | None = None
     model_pred_score: float | None = None
     calibrated_threshold: float | None = None
+    unet_image_score: float | None = None
+    patchcore_image_score: float | None = None
+    unet_image_threshold: float | None = None
+    patchcore_image_threshold: float | None = None
+    image_decision_source: str | None = None
+    patchcore_score_column: str | None = None
     score_mode: str | None = None
     score_aggregation: str | None = None
     score_local_sigma: float | None = None
@@ -313,6 +319,12 @@ def read_predictions(path: Path) -> list[PredictionRow]:
                     raw_pred_score=safe_float(raw.get("raw_pred_score")),
                     model_pred_score=safe_float(raw.get("model_pred_score")),
                     calibrated_threshold=safe_float(raw.get("calibrated_threshold")),
+                    unet_image_score=safe_float(raw.get("unet_image_score")),
+                    patchcore_image_score=safe_float(raw.get("patchcore_image_score")),
+                    unet_image_threshold=safe_float(raw.get("unet_image_threshold")),
+                    patchcore_image_threshold=safe_float(raw.get("patchcore_image_threshold")),
+                    image_decision_source=raw.get("image_decision_source") or None,
+                    patchcore_score_column=raw.get("patchcore_score_column") or None,
                     score_mode=raw.get("score_mode") or None,
                     score_aggregation=raw.get("score_aggregation") or None,
                     score_local_sigma=safe_float(raw.get("score_local_sigma")),
@@ -886,8 +898,10 @@ def render_image_gallery(record: ModelArtifacts, output_dir: Path, max_items: in
             f"<span>GT {html.escape(str(row.gt_label or 'unknown'))} | "
             f"Pred {html.escape(prediction_label(row.pred_label))} | Score {row.pred_score:.4f}"
             f"{' | Model ' + format_number(row.model_pred_score) if row.model_pred_score is not None else ''}"
+            f"{' | Source ' + html.escape(row.image_decision_source) if row.image_decision_source else ''}"
             f"{' | ' + html.escape(row.score_aggregation) + '/' + html.escape(row.roi_mode or 'off') if row.score_aggregation else ''}"
             f"{' | Threshold ' + format_number(row.calibrated_threshold) if row.calibrated_threshold is not None else ''}</span>"
+            f"{'<span>PatchCore ' + format_number(row.patchcore_image_score) + ' @ ' + format_number(row.patchcore_image_threshold) + ' | U-Net ' + format_number(row.unet_image_score) + ' @ ' + format_number(row.unet_image_threshold) + '</span>' if row.patchcore_image_score is not None or row.unet_image_score is not None else ''}"
             f"{'<span>Pixel Dice ' + format_number(row.pixel_dice) + ' | IoU ' + format_number(row.pixel_iou) + ' | Area ' + format_percent(row.pred_area_fraction) + ' | Blob ' + format_percent(row.largest_blob_fraction) + '</span>' if row.pixel_dice is not None else ''}"
             "</div>"
             f"<div class=\"sample-images\">{''.join(image_blocks)}</div>"

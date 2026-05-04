@@ -122,7 +122,22 @@ def parse_args() -> argparse.Namespace:
         "--image-score-mode",
         choices=["max", "p99", "area", "blob", "hybrid"],
         default="hybrid",
-        help="How to convert predicted masks into image-level anomaly scores.",
+        help="How to convert predicted masks into U-Net image-level anomaly scores.",
+    )
+    parser.add_argument(
+        "--image-decision-source",
+        choices=["patchcore", "unet"],
+        default="patchcore",
+        help=(
+            "Final good/bad decision source. patchcore keeps image-level gating in PatchCore and uses U-Net "
+            "for localization; unet keeps the previous mask-score behavior."
+        ),
+    )
+    parser.add_argument(
+        "--patchcore-score-column",
+        choices=["model_pred_score", "pred_score"],
+        default="model_pred_score",
+        help="PatchCore score column from generated predictions.csv used for image-level gating.",
     )
     parser.add_argument(
         "--image-p99-weight",
@@ -148,13 +163,13 @@ def parse_args() -> argparse.Namespace:
         "--image-threshold-min",
         type=float,
         default=None,
-        help="Optional lower bound for validation-selected image threshold, e.g. 0.006.",
+        help="Optional lower bound for validation-selected U-Net image threshold, e.g. 0.006.",
     )
     parser.add_argument(
         "--image-threshold-max",
         type=float,
         default=None,
-        help="Optional upper bound for validation-selected image threshold, e.g. 0.008.",
+        help="Optional upper bound for validation-selected U-Net image threshold, e.g. 0.008.",
     )
     parser.add_argument(
         "--hybrid-checkpoint",
@@ -375,6 +390,8 @@ def prepare_hybrid_split(args: argparse.Namespace, split_dir: Path) -> dict[str,
 
 
 def train_patchcore_stage(args: argparse.Namespace, project_root: Path, image_size: tuple[int, int], patchcore_results_dir: Path) -> None:
+    if args.clean and patchcore_results_dir.exists():
+        shutil.rmtree(patchcore_results_dir)
     command = [
         sys.executable,
         "train_demo.py",
@@ -489,6 +506,8 @@ class HybridSample:
     mask_path: Path
     label: int
     name: str
+    patchcore_pred_score: float
+    patchcore_model_pred_score: float
 
 
 def load_hybrid_samples(output_dir: Path, split: str) -> list[HybridSample]:
@@ -519,6 +538,8 @@ def load_hybrid_samples(output_dir: Path, split: str) -> list[HybridSample]:
                     mask_path=mask_path,
                     label=label,
                     name=str(row.get("image_name") or image_path.name),
+                    patchcore_pred_score=float(row.get("pred_score") or 0.0),
+                    patchcore_model_pred_score=float(row.get("model_pred_score") or row.get("pred_score") or 0.0),
                 ),
             )
     if not samples:
@@ -687,6 +708,8 @@ class HybridMapDataset:
             "label": torch.tensor(sample.label, dtype=torch.long),
             "name": sample.name,
             "image_path": str(sample.image_path),
+            "patchcore_pred_score": torch.tensor(sample.patchcore_pred_score, dtype=torch.float32),
+            "patchcore_model_pred_score": torch.tensor(sample.patchcore_model_pred_score, dtype=torch.float32),
         }
 
 
@@ -1111,6 +1134,9 @@ def evaluate_model(
     device: Any,
     mask_threshold: float,
     image_threshold: float | None,
+    patchcore_image_threshold: float | None,
+    image_decision_source: str,
+    patchcore_score_column: str,
     image_score_mode: str,
     image_p99_weight: float,
     image_area_weight: float,
@@ -1128,11 +1154,13 @@ def evaluate_model(
 
     model.eval()
     labels: list[int] = []
-    scores: list[float] = []
+    unet_scores: list[float] = []
+    patchcore_scores: list[float] = []
     rows: list[dict[str, Any]] = []
     global_tp = global_fp = global_fn = 0
     per_image_dice: list[float] = []
     per_image_iou: list[float] = []
+    patchcore_batch_key = "patchcore_model_pred_score" if patchcore_score_column == "model_pred_score" else "patchcore_pred_score"
 
     if save_dir is not None:
         (save_dir / "pred_masks").mkdir(parents=True, exist_ok=True)
@@ -1149,6 +1177,7 @@ def evaluate_model(
             batch_labels = batch["label"].cpu().numpy().astype(int).tolist()
             names = list(batch["name"])
             image_paths = list(batch["image_path"])
+            batch_patchcore_scores = batch[patchcore_batch_key].cpu().numpy().astype(float).tolist()
 
             for idx, prob in enumerate(probs):
                 post = postprocess_probability_mask(
@@ -1168,7 +1197,7 @@ def evaluate_model(
                 iou = safe_iou(tp, fp, fn)
                 area_fraction = float(post["area_fraction"])
                 blob_fraction = float(post["largest_blob_fraction"])
-                score = image_score_from_prob(
+                unet_score = image_score_from_prob(
                     prob,
                     mode=image_score_mode,
                     p99_weight=image_p99_weight,
@@ -1177,10 +1206,18 @@ def evaluate_model(
                     area_fraction=area_fraction,
                     blob_fraction=blob_fraction,
                 )
+                patchcore_score = float(batch_patchcore_scores[idx])
                 label = int(batch_labels[idx])
-                pred_label = "" if image_threshold is None else int(score >= image_threshold)
+                if image_decision_source == "patchcore":
+                    final_score = patchcore_score
+                    final_threshold = patchcore_image_threshold
+                else:
+                    final_score = unet_score
+                    final_threshold = image_threshold
+                pred_label = "" if final_threshold is None else int(final_score >= final_threshold)
                 labels.append(label)
-                scores.append(score)
+                unet_scores.append(unet_score)
+                patchcore_scores.append(patchcore_score)
                 per_image_dice.append(dice)
                 per_image_iou.append(iou)
 
@@ -1206,9 +1243,16 @@ def evaluate_model(
                         "gt_label": "bad" if label else "good",
                         "pred_label": pred_label,
                         "correct": "" if pred_label == "" else bool(pred_label == label),
-                        "image_score": score,
+                        "image_score": final_score,
+                        "final_image_score": final_score,
+                        "unet_image_score": unet_score,
+                        "patchcore_image_score": patchcore_score,
+                        "image_decision_source": image_decision_source,
+                        "patchcore_score_column": patchcore_score_column,
                         "mask_threshold": mask_threshold,
-                        "image_threshold": "" if image_threshold is None else image_threshold,
+                        "image_threshold": "" if final_threshold is None else final_threshold,
+                        "unet_image_threshold": "" if image_threshold is None else image_threshold,
+                        "patchcore_image_threshold": "" if patchcore_image_threshold is None else patchcore_image_threshold,
                         "raw_area_fraction": post["raw_area_fraction"],
                         "pred_area_fraction": area_fraction,
                         "largest_blob_fraction": blob_fraction,
@@ -1224,15 +1268,17 @@ def evaluate_model(
                     },
                 )
 
-    image_report = (
-        image_metrics(labels, scores, image_threshold, image_threshold_min, image_threshold_max)
-        if labels
-        else {}
-    )
+    unet_image_report = image_metrics(labels, unet_scores, image_threshold, image_threshold_min, image_threshold_max) if labels else {}
+    patchcore_image_report = image_metrics(labels, patchcore_scores, patchcore_image_threshold) if labels else {}
+    image_report = patchcore_image_report if image_decision_source == "patchcore" else unet_image_report
     report = {
         "num_samples": len(labels),
         "mask_threshold": mask_threshold,
-        "image_threshold": image_threshold,
+        "image_threshold": patchcore_image_threshold if image_decision_source == "patchcore" else image_threshold,
+        "unet_image_threshold": image_threshold,
+        "patchcore_image_threshold": patchcore_image_threshold,
+        "image_decision_source": image_decision_source,
+        "patchcore_score_column": patchcore_score_column,
         "image_score_mode": image_score_mode,
         "image_p99_weight": image_p99_weight,
         "image_area_weight": image_area_weight,
@@ -1249,6 +1295,8 @@ def evaluate_model(
         "pixel_fp": global_fp,
         "pixel_fn": global_fn,
         "image": image_report,
+        "unet_image": unet_image_report,
+        "patchcore_image": patchcore_image_report,
     }
     return report, rows
 
@@ -1340,6 +1388,8 @@ def load_torch_checkpoint(path: Path, device: Any) -> dict[str, Any]:
 
 def evaluate_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return {
+        "image_decision_source": args.image_decision_source,
+        "patchcore_score_column": args.patchcore_score_column,
         "image_score_mode": args.image_score_mode,
         "image_p99_weight": args.image_p99_weight,
         "image_area_weight": args.image_area_weight,
@@ -1491,9 +1541,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
                 device=device,
                 mask_threshold=0.5,
                 image_threshold=None,
+                patchcore_image_threshold=None,
                 **evaluate_kwargs(args),
             )
-            val_image = val_report["image"]
+            val_image = val_report["unet_image"]
             val_score = float(val_report["pixel_dice_global"]) + float(val_image["f1"])
             row = {
                 "epoch": epoch,
@@ -1538,6 +1589,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             device=device,
             mask_threshold=float(candidate),
             image_threshold=None,
+            patchcore_image_threshold=None,
             **evaluate_kwargs(args),
         )
         score = float(report["pixel_dice_global"])
@@ -1551,16 +1603,20 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=None,
+        patchcore_image_threshold=None,
         **evaluate_kwargs(args),
     )
-    image_threshold = float(val_report_for_threshold["image"]["threshold"])
+    unet_image_threshold = float(val_report_for_threshold["unet_image"]["threshold"])
+    patchcore_image_threshold = float(val_report_for_threshold["patchcore_image"]["threshold"])
+    final_image_threshold = patchcore_image_threshold if args.image_decision_source == "patchcore" else unet_image_threshold
 
     train_report, train_rows = evaluate_model(
         model,
         train_eval_loader,
         device=device,
         mask_threshold=best_mask_threshold,
-        image_threshold=image_threshold,
+        image_threshold=unet_image_threshold,
+        patchcore_image_threshold=patchcore_image_threshold,
         **evaluate_kwargs(args),
     )
     val_report, val_rows = evaluate_model(
@@ -1568,7 +1624,8 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         val_loader,
         device=device,
         mask_threshold=best_mask_threshold,
-        image_threshold=image_threshold,
+        image_threshold=unet_image_threshold,
+        patchcore_image_threshold=patchcore_image_threshold,
         **evaluate_kwargs(args),
     )
     test_save_dir = output_dir / "test_visuals" if args.save_test_maps else None
@@ -1577,7 +1634,8 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         test_loader,
         device=device,
         mask_threshold=best_mask_threshold,
-        image_threshold=image_threshold,
+        image_threshold=unet_image_threshold,
+        patchcore_image_threshold=patchcore_image_threshold,
         **evaluate_kwargs(args),
         save_dir=test_save_dir,
     )
@@ -1594,7 +1652,11 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         "model": "hybrid_patchcore_unet",
         "checkpoint": str(best_path),
         "best_mask_threshold": best_mask_threshold,
-        "image_threshold": image_threshold,
+        "image_threshold": final_image_threshold,
+        "unet_image_threshold": unet_image_threshold,
+        "patchcore_image_threshold": patchcore_image_threshold,
+        "image_decision_source": args.image_decision_source,
+        "patchcore_score_column": args.patchcore_score_column,
         "image_score_mode": args.image_score_mode,
         "training": {
             "train_crop_size": args.hybrid_train_crop_size,
@@ -1630,7 +1692,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     print("[INFO] Hybrid evaluation done" if args.eval_only else "[INFO] Hybrid training done")
     print(f"[INFO] Best checkpoint : {best_path}")
     print(f"[INFO] Mask threshold  : {best_mask_threshold:.3f}")
-    print(f"[INFO] Image threshold : {image_threshold:.6f}")
+    print(f"[INFO] Decision source : {args.image_decision_source} ({args.patchcore_score_column})")
+    print(f"[INFO] Image threshold : {final_image_threshold:.6f}")
+    print(f"[INFO] U-Net threshold : {unet_image_threshold:.6f}")
+    print(f"[INFO] PatchCore thr   : {patchcore_image_threshold:.6f}")
     print(f"[INFO] Test image acc  : {test_report['image']['accuracy']:.4f}")
     print(f"[INFO] Test image F1   : {test_report['image']['f1']:.4f}")
     print(f"[INFO] Test image AUC  : {test_report['image']['auc']}")

@@ -5,10 +5,15 @@
 Workflow:
 
 1. Split VisA into supervised `train/val/test` folders.
-2. Use PatchCore via `infer_demo.py` to export anomaly maps for each split.
+2. Use PatchCore via `infer_demo.py` to export anomaly maps and image scores for each split.
 3. Train a small 4-channel U-Net on `RGB + anomaly_map`.
-4. Calibrate image-level good/bad threshold on validation predictions.
-5. Report image accuracy/F1/AUC and pixel Dice/IoU.
+4. Calibrate PatchCore image-level good/bad threshold on validation predictions.
+5. Use U-Net only for localization/masks, with mask threshold selected on validation Dice.
+6. Report final image accuracy/F1/AUC from PatchCore and pixel Dice/IoU from U-Net.
+
+This is the recommended product-style flow for small defects: PatchCore decides whether an image is good/bad, and
+U-Net explains where the defect is. To compare against the older behavior where U-Net mask scores decide image-level
+labels, pass `--image-decision-source unet`.
 
 Run the full workflow on the server GPU:
 
@@ -31,6 +36,8 @@ python3 hybrid_demo.py \
   --test-bad 20 \
   --hybrid-epochs 40 \
   --hybrid-batch-size 8 \
+  --image-decision-source patchcore \
+  --patchcore-score-column model_pred_score \
   --num-workers 4 \
   --accelerator gpu \
   --devices 1 \
@@ -48,6 +55,8 @@ python3 hybrid_demo.py \
   --image-size 384 \
   --hybrid-epochs 40 \
   --hybrid-batch-size 8 \
+  --image-decision-source patchcore \
+  --patchcore-score-column model_pred_score \
   --num-workers 4 \
   --accelerator gpu \
   --devices 1 \
@@ -87,14 +96,14 @@ python3 hybrid_demo.py \
   --tversky-beta 0.7 \
   --postprocess-min-component-area 60 \
   --postprocess-object-edge-ignore-px 0 \
-  --image-p99-weight 0.25 \
-  --image-threshold-min 0.003 \
-  --image-threshold-max 0.006 \
+  --image-decision-source patchcore \
+  --patchcore-score-column model_pred_score \
   --save-test-maps
 ```
 
-If this uses too much VRAM, lower `--hybrid-batch-size` to `8`. The validation and test passes still use the full
-image size; crops affect only training batches.
+For an RTX A4000 16 GB, start with `--image-size 384`, PatchCore `float16`, `coreset 0.10`, U-Net
+`--hybrid-batch-size 8`, and crop training at `256`. If VRAM is stable, try `--hybrid-batch-size 16` for the crop-only
+training pass. The validation and test passes still use the full image size; crops affect only training batches.
 
 Important outputs:
 
@@ -103,6 +112,13 @@ Important outputs:
 - `hybrid_outputs_visa_<category>/summary.json`: final metrics.
 - `hybrid_outputs_visa_<category>/test_predictions.csv`: per-image decisions and pixel metrics.
 - `hybrid_outputs_visa_<category>/test_visuals/`: predicted masks and overlays when `--save-test-maps` is used.
+
+Important scoring fields:
+
+- `patchcore_image_score`: image-level score used by default for final good/bad.
+- `unet_image_score`: optional mask-derived image score for comparison/debugging.
+- `image_score` / `final_image_score`: the score from the active `--image-decision-source`.
+- `patchcore_image_threshold` and `unet_image_threshold`: thresholds selected from validation.
 
 ## Post-processing sweep
 
@@ -125,9 +141,8 @@ python3 hybrid_demo.py \
   --devices 1 \
   --postprocess-min-component-area 150 \
   --postprocess-object-edge-ignore-px 8 \
-  --image-p99-weight 0.25 \
-  --image-threshold-min 0.006 \
-  --image-threshold-max 0.008 \
+  --image-decision-source patchcore \
+  --patchcore-score-column model_pred_score \
   --save-test-maps
 ```
 
