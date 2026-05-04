@@ -30,6 +30,8 @@ TRAIN_METRIC_KEYS = (
     "train_ae",
     "train_stae",
     "val_pixel_dice",
+    "val_bad_pixel_dice",
+    "checkpoint_score",
     "val_image_f1",
     "val_image_acc",
 )
@@ -38,6 +40,7 @@ MODEL_LABELS = {
     "padim": "PaDiM",
     "fastflow": "FastFlow",
     "hybrid_patchcore_unet": "Hybrid PatchCore + U-Net",
+    "hybrid_patchcore_segmentation": "Hybrid PatchCore + Segmentation",
 }
 MODEL_COLORS = ("#0f766e", "#c2410c", "#2563eb", "#7c2d12", "#4338ca", "#15803d")
 GOOD_COLOR = "#0f766e"

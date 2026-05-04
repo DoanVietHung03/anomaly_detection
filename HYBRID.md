@@ -1,4 +1,4 @@
-# Hybrid PatchCore + U-Net on VisA
+# Hybrid PatchCore + Supervised Segmentation on VisA
 
 `hybrid_demo.py` adds a supervised stage without changing the existing PatchCore, PaDiM, or FastFlow scripts.
 
@@ -6,13 +6,13 @@ Workflow:
 
 1. Split VisA into supervised `train/val/test` folders.
 2. Use PatchCore via `infer_demo.py` to export anomaly maps and image scores for each split.
-3. Train a small 4-channel U-Net on `RGB + anomaly_map`.
+3. Train a 4-channel segmentation model on `RGB + anomaly_map`.
 4. Calibrate PatchCore image-level good/bad threshold on validation predictions.
 5. Use U-Net only for localization/masks, with mask threshold selected on validation Dice.
-6. Report final image accuracy/F1/AUC from PatchCore and pixel Dice/IoU from U-Net.
+6. Report final image accuracy/F1/AUC from PatchCore and pixel Dice/IoU from the segmentation model.
 
 This is the recommended product-style flow for small defects: PatchCore decides whether an image is good/bad, and
-U-Net explains where the defect is. To compare against the older behavior where U-Net mask scores decide image-level
+the segmentation model explains where the defect is. To compare against the older behavior where mask scores decide image-level
 labels, pass `--image-decision-source unet`.
 
 Run the full workflow on the server GPU:
@@ -37,7 +37,9 @@ python3 hybrid_demo.py \
   --hybrid-epochs 40 \
   --hybrid-batch-size 8 \
   --image-decision-source patchcore \
-  --patchcore-score-column model_pred_score \
+  --patchcore-score-column pred_score \
+  --patchcore-threshold-min-recall 0.90 \
+  --patchcore-threshold-min-specificity 0.92 \
   --num-workers 4 \
   --accelerator gpu \
   --devices 1 \
@@ -56,14 +58,75 @@ python3 hybrid_demo.py \
   --hybrid-epochs 40 \
   --hybrid-batch-size 8 \
   --image-decision-source patchcore \
-  --patchcore-score-column model_pred_score \
+  --patchcore-score-column pred_score \
+  --patchcore-threshold-min-recall 0.90 \
+  --patchcore-threshold-min-specificity 0.92 \
   --num-workers 4 \
   --accelerator gpu \
   --devices 1 \
   --save-test-maps
 ```
 
-## Small-defect segmentation training
+## Pretrained Segmentation Training
+
+Install the segmentation dependency once on the server:
+
+```bash
+python3 -m pip install segmentation-models-pytorch timm
+```
+
+The strongest A4000-friendly starting point is FPN with a ResNet34 ImageNet encoder. It improves the mask model while
+keeping PatchCore as the image-level decision source:
+
+```bash
+python3 hybrid_demo.py \
+  --dataset-root ./VisA \
+  --category candle \
+  --split-dir ./hybrid_result_visa_candle/hybrid_inputs_visa_candle \
+  --patchcore-results-dir ./hybrid_result_visa_candle/runs_visa_candle_patchcore \
+  --maps-dir ./hybrid_result_visa_candle/hybrid_maps_visa_candle_patchcore \
+  --output-dir ./hybrid_result_visa_candle/hybrid_outputs_visa_candle_fpn \
+  --skip-prepare \
+  --skip-map-generation \
+  --image-size 384 \
+  --seg-arch fpn \
+  --seg-encoder resnet34 \
+  --seg-encoder-weights imagenet \
+  --checkpoint-selection pixel \
+  --mask-threshold-selection pixel \
+  --hybrid-epochs 80 \
+  --hybrid-batch-size 4 \
+  --hybrid-train-crop-size 256 \
+  --defect-crop-prob 0.90 \
+  --small-defect-oversample 4.0 \
+  --small-defect-area-threshold 600 \
+  --bce-weight 0.5 \
+  --dice-weight 1.0 \
+  --focal-weight 0.75 \
+  --focal-alpha 0.8 \
+  --focal-gamma 2.0 \
+  --tversky-weight 0.75 \
+  --tversky-alpha 0.3 \
+  --tversky-beta 0.7 \
+  --postprocess-min-component-area 40 \
+  --fallback-mask-source patchcore_if_small \
+  --fallback-min-unet-area-fraction 0.001 \
+  --fallback-patchcore-percentile 99.7 \
+  --fallback-max-area-fraction 0.02 \
+  --image-decision-source patchcore \
+  --patchcore-score-column pred_score \
+  --patchcore-threshold-min-recall 0.90 \
+  --patchcore-threshold-min-specificity 0.92 \
+  --num-workers 4 \
+  --accelerator gpu \
+  --devices 1 \
+  --save-test-maps
+```
+
+If the server has no internet for ImageNet weights, use `--seg-encoder-weights none`. If FPN fits comfortably, try
+`--seg-arch unetpp` next; it is heavier but can produce sharper masks.
+
+## Small-defect Segmentation Training
 
 If image-level post-processing still misses tiny defects, retrain only the U-Net stage with defect-centered crops,
 small-defect oversampling, and focal/Tversky losses. Reuse the existing PatchCore maps:
@@ -97,7 +160,9 @@ python3 hybrid_demo.py \
   --postprocess-min-component-area 60 \
   --postprocess-object-edge-ignore-px 0 \
   --image-decision-source patchcore \
-  --patchcore-score-column model_pred_score \
+  --patchcore-score-column pred_score \
+  --patchcore-threshold-min-recall 0.90 \
+  --patchcore-threshold-min-specificity 0.92 \
   --save-test-maps
 ```
 
@@ -119,6 +184,7 @@ Important scoring fields:
 - `unet_image_score`: optional mask-derived image score for comparison/debugging.
 - `image_score` / `final_image_score`: the score from the active `--image-decision-source`.
 - `patchcore_image_threshold` and `unet_image_threshold`: thresholds selected from validation.
+- `mask_source` / `fallback_used`: whether the final visualization mask came from the segmentation model or PatchCore fallback.
 
 ## Post-processing sweep
 
@@ -142,7 +208,9 @@ python3 hybrid_demo.py \
   --postprocess-min-component-area 150 \
   --postprocess-object-edge-ignore-px 8 \
   --image-decision-source patchcore \
-  --patchcore-score-column model_pred_score \
+  --patchcore-score-column pred_score \
+  --patchcore-threshold-min-recall 0.90 \
+  --patchcore-threshold-min-specificity 0.92 \
   --save-test-maps
 ```
 

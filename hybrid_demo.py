@@ -85,6 +85,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--base-channels", type=int, default=32)
+    parser.add_argument(
+        "--seg-arch",
+        choices=["small_unet", "fpn", "unetpp", "deeplabv3p"],
+        default="small_unet",
+        help="Hybrid segmentation architecture. fpn/unetpp/deeplabv3p require segmentation-models-pytorch.",
+    )
+    parser.add_argument("--seg-encoder", default="resnet34", help="Pretrained encoder for SMP segmentation models.")
+    parser.add_argument(
+        "--seg-encoder-weights",
+        default="imagenet",
+        help="Encoder weights for SMP models. Use none on offline servers.",
+    )
+    parser.add_argument(
+        "--checkpoint-selection",
+        choices=["balanced", "pixel", "bad_pixel", "pixel_iou"],
+        default="pixel",
+        help="Validation metric used to save the best segmentation checkpoint.",
+    )
+    parser.add_argument(
+        "--mask-threshold-selection",
+        choices=["pixel", "bad_pixel", "pixel_iou"],
+        default="pixel",
+        help="Validation metric used to choose the final mask threshold.",
+    )
     parser.add_argument("--bce-weight", type=float, default=1.0)
     parser.add_argument("--dice-weight", type=float, default=1.0)
     parser.add_argument("--max-pos-weight", type=float, default=30.0)
@@ -170,6 +194,36 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Suppress predictions in a band around the detected object boundary. Useful for candle rim false positives.",
+    )
+    parser.add_argument(
+        "--fallback-mask-source",
+        choices=["none", "patchcore_if_empty", "patchcore_if_small"],
+        default="none",
+        help="Use PatchCore anomaly map as a localization fallback when the segmentation mask is empty/small.",
+    )
+    parser.add_argument(
+        "--fallback-min-unet-area-fraction",
+        type=float,
+        default=0.001,
+        help="For patchcore_if_small, fallback when U-Net mask area fraction is at or below this value.",
+    )
+    parser.add_argument(
+        "--fallback-patchcore-percentile",
+        type=float,
+        default=99.7,
+        help="Percentile threshold on the normalized PatchCore anomaly map for fallback masks.",
+    )
+    parser.add_argument(
+        "--fallback-patchcore-min-value",
+        type=float,
+        default=0.0,
+        help="Minimum normalized PatchCore anomaly value required for fallback masks.",
+    )
+    parser.add_argument(
+        "--fallback-max-area-fraction",
+        type=float,
+        default=0.02,
+        help="Skip fallback masks larger than this area fraction. 0 disables the cap.",
     )
     parser.add_argument(
         "--image-threshold-min",
@@ -837,6 +891,51 @@ def build_unet(in_channels: int, base_channels: int) -> Any:
     return SmallUNet()
 
 
+def normalize_optional_weight_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if normalized.lower() in {"", "none", "null", "false", "0"}:
+        return None
+    return normalized
+
+
+def build_segmentation_model(
+    *,
+    in_channels: int,
+    base_channels: int,
+    seg_arch: str,
+    seg_encoder: str,
+    seg_encoder_weights: str | None,
+) -> Any:
+    if seg_arch == "small_unet":
+        return build_unet(in_channels=in_channels, base_channels=base_channels)
+
+    try:
+        import segmentation_models_pytorch as smp
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing dependency for --seg-arch "
+            f"{seg_arch!r}. Install it with: python3 -m pip install segmentation-models-pytorch timm",
+        ) from exc
+
+    weights = normalize_optional_weight_name(seg_encoder_weights)
+    common_kwargs = {
+        "encoder_name": seg_encoder,
+        "encoder_weights": weights,
+        "in_channels": in_channels,
+        "classes": 1,
+        "activation": None,
+    }
+    if seg_arch == "fpn":
+        return smp.FPN(**common_kwargs)
+    if seg_arch == "unetpp":
+        return smp.UnetPlusPlus(**common_kwargs)
+    if seg_arch == "deeplabv3p":
+        return smp.DeepLabV3Plus(**common_kwargs)
+    raise SystemExit(f"Unknown --seg-arch: {seg_arch}")
+
+
 def dice_loss_from_logits(logits: Any, targets: Any, eps: float = 1e-6) -> Any:
     import torch
 
@@ -994,6 +1093,54 @@ def postprocess_probability_mask(
         "edge_suppressed_pixels": edge_suppressed_pixels,
         "effective_min_component_area": effective_min_area,
     }
+
+
+def postprocess_patchcore_fallback_mask(
+    anomaly: Any,
+    *,
+    percentile: float,
+    min_value: float,
+    max_area_fraction: float,
+    min_component_area: int,
+    edge_ignore_px: int,
+    rgb: Any | None,
+) -> dict[str, Any]:
+    import numpy as np
+
+    anomaly_arr = np.asarray(anomaly, dtype=np.float32)
+    percentile_threshold = float(np.percentile(anomaly_arr, percentile))
+    threshold = max(float(min_value), percentile_threshold)
+    post = postprocess_probability_mask(
+        anomaly_arr,
+        mask_threshold=threshold,
+        min_component_area=min_component_area,
+        edge_ignore_px=edge_ignore_px,
+        rgb=rgb,
+    )
+    post["fallback_threshold"] = threshold
+    post["fallback_percentile"] = percentile
+    post["fallback_skipped_by_area_cap"] = False
+    if max_area_fraction > 0.0 and float(post["area_fraction"]) > max_area_fraction:
+        post["fallback_skipped_by_area_cap"] = True
+    return post
+
+
+def should_use_patchcore_fallback(
+    *,
+    fallback_mask_source: str,
+    pred_label: Any,
+    unet_post: dict[str, Any],
+    fallback_min_unet_area_fraction: float,
+) -> bool:
+    if fallback_mask_source == "none" or pred_label == "":
+        return False
+    if int(pred_label) != 1:
+        return False
+    if fallback_mask_source == "patchcore_if_empty":
+        return int(unet_post["component_count"]) == 0
+    if fallback_mask_source == "patchcore_if_small":
+        return float(unet_post["area_fraction"]) <= fallback_min_unet_area_fraction
+    return False
 
 
 def image_score_from_prob(
@@ -1199,6 +1346,11 @@ def evaluate_model(
     image_blob_weight: float,
     postprocess_min_component_area: int,
     postprocess_object_edge_ignore_px: int,
+    fallback_mask_source: str,
+    fallback_min_unet_area_fraction: float,
+    fallback_patchcore_percentile: float,
+    fallback_patchcore_min_value: float,
+    fallback_max_area_fraction: float,
     image_threshold_min: float | None,
     image_threshold_max: float | None,
     save_dir: Path | None = None,
@@ -1214,8 +1366,12 @@ def evaluate_model(
     patchcore_scores: list[float] = []
     rows: list[dict[str, Any]] = []
     global_tp = global_fp = global_fn = 0
+    bad_tp = bad_fp = bad_fn = 0
     per_image_dice: list[float] = []
     per_image_iou: list[float] = []
+    per_bad_image_dice: list[float] = []
+    per_bad_image_iou: list[float] = []
+    fallback_used_count = 0
     patchcore_batch_key = "patchcore_model_pred_score" if patchcore_score_column == "model_pred_score" else "patchcore_pred_score"
 
     if save_dir is not None:
@@ -1230,37 +1386,30 @@ def evaluate_model(
             probs = torch.sigmoid(model(x)).cpu().numpy()[:, 0]
             targets = target.cpu().numpy()[:, 0]
             rgbs = x_cpu[:, :3].cpu().numpy()
+            anomaly_maps = x_cpu[:, 3].cpu().numpy()
             batch_labels = batch["label"].cpu().numpy().astype(int).tolist()
             names = list(batch["name"])
             image_paths = list(batch["image_path"])
             batch_patchcore_scores = batch[patchcore_batch_key].cpu().numpy().astype(float).tolist()
 
             for idx, prob in enumerate(probs):
-                post = postprocess_probability_mask(
+                unet_post = postprocess_probability_mask(
                     prob,
                     mask_threshold=mask_threshold,
                     min_component_area=postprocess_min_component_area,
                     edge_ignore_px=postprocess_object_edge_ignore_px,
                     rgb=rgbs[idx],
                 )
-                pred_mask = post["mask"]
-                gt_mask = targets[idx] >= 0.5
-                tp, fp, fn = pixel_stats(pred_mask, gt_mask)
-                global_tp += tp
-                global_fp += fp
-                global_fn += fn
-                dice = safe_dice(tp, fp, fn)
-                iou = safe_iou(tp, fp, fn)
-                area_fraction = float(post["area_fraction"])
-                blob_fraction = float(post["largest_blob_fraction"])
+                unet_area_fraction = float(unet_post["area_fraction"])
+                unet_blob_fraction = float(unet_post["largest_blob_fraction"])
                 unet_score = image_score_from_prob(
                     prob,
                     mode=image_score_mode,
                     p99_weight=image_p99_weight,
                     area_weight=image_area_weight,
                     blob_weight=image_blob_weight,
-                    area_fraction=area_fraction,
-                    blob_fraction=blob_fraction,
+                    area_fraction=unet_area_fraction,
+                    blob_fraction=unet_blob_fraction,
                 )
                 patchcore_score = float(batch_patchcore_scores[idx])
                 label = int(batch_labels[idx])
@@ -1271,11 +1420,61 @@ def evaluate_model(
                     final_score = unet_score
                     final_threshold = image_threshold
                 pred_label = "" if final_threshold is None else int(final_score >= final_threshold)
+
+                post = unet_post
+                mask_source = "unet"
+                fallback_used = False
+                fallback_threshold: float | str = ""
+                fallback_candidate_area: float | str = ""
+                fallback_candidate_component_count: int | str = ""
+                fallback_skipped_by_area_cap = False
+                if should_use_patchcore_fallback(
+                    fallback_mask_source=fallback_mask_source,
+                    pred_label=pred_label,
+                    unet_post=unet_post,
+                    fallback_min_unet_area_fraction=fallback_min_unet_area_fraction,
+                ):
+                    fallback_post = postprocess_patchcore_fallback_mask(
+                        anomaly_maps[idx],
+                        percentile=fallback_patchcore_percentile,
+                        min_value=fallback_patchcore_min_value,
+                        max_area_fraction=fallback_max_area_fraction,
+                        min_component_area=postprocess_min_component_area,
+                        edge_ignore_px=postprocess_object_edge_ignore_px,
+                        rgb=rgbs[idx],
+                    )
+                    fallback_threshold = float(fallback_post["fallback_threshold"])
+                    fallback_candidate_area = float(fallback_post["area_fraction"])
+                    fallback_candidate_component_count = int(fallback_post["component_count"])
+                    fallback_skipped_by_area_cap = bool(fallback_post["fallback_skipped_by_area_cap"])
+                    if fallback_candidate_component_count > 0 and not fallback_skipped_by_area_cap:
+                        post = fallback_post
+                        mask_source = "patchcore_fallback"
+                        fallback_used = True
+                        fallback_used_count += 1
+
+                pred_mask = post["mask"]
+                gt_mask = targets[idx] >= 0.5
+                tp, fp, fn = pixel_stats(pred_mask, gt_mask)
+                global_tp += tp
+                global_fp += fp
+                global_fn += fn
+                if label == 1:
+                    bad_tp += tp
+                    bad_fp += fp
+                    bad_fn += fn
+                dice = safe_dice(tp, fp, fn)
+                iou = safe_iou(tp, fp, fn)
+                area_fraction = float(post["area_fraction"])
+                blob_fraction = float(post["largest_blob_fraction"])
                 labels.append(label)
                 unet_scores.append(unet_score)
                 patchcore_scores.append(patchcore_score)
                 per_image_dice.append(dice)
                 per_image_iou.append(iou)
+                if label == 1:
+                    per_bad_image_dice.append(dice)
+                    per_bad_image_iou.append(iou)
 
                 pred_mask_rel = ""
                 overlay_rel = ""
@@ -1305,10 +1504,21 @@ def evaluate_model(
                         "patchcore_image_score": patchcore_score,
                         "image_decision_source": image_decision_source,
                         "patchcore_score_column": patchcore_score_column,
+                        "mask_source": mask_source,
+                        "fallback_used": fallback_used,
+                        "fallback_threshold": fallback_threshold,
+                        "fallback_candidate_area_fraction": fallback_candidate_area,
+                        "fallback_candidate_component_count": fallback_candidate_component_count,
+                        "fallback_skipped_by_area_cap": fallback_skipped_by_area_cap,
                         "mask_threshold": mask_threshold,
                         "image_threshold": "" if final_threshold is None else final_threshold,
                         "unet_image_threshold": "" if image_threshold is None else image_threshold,
                         "patchcore_image_threshold": "" if patchcore_image_threshold is None else patchcore_image_threshold,
+                        "unet_raw_area_fraction": unet_post["raw_area_fraction"],
+                        "unet_pred_area_fraction": unet_area_fraction,
+                        "unet_largest_blob_fraction": unet_blob_fraction,
+                        "unet_component_count": unet_post["component_count"],
+                        "unet_largest_component_area": unet_post["largest_component_area"],
                         "raw_area_fraction": post["raw_area_fraction"],
                         "pred_area_fraction": area_fraction,
                         "largest_blob_fraction": blob_fraction,
@@ -1357,11 +1567,20 @@ def evaluate_model(
         "image_threshold_max": image_threshold_max,
         "pixel_dice_global": safe_dice(global_tp, global_fp, global_fn),
         "pixel_iou_global": safe_iou(global_tp, global_fp, global_fn),
+        "bad_pixel_dice_global": safe_dice(bad_tp, bad_fp, bad_fn),
+        "bad_pixel_iou_global": safe_iou(bad_tp, bad_fp, bad_fn),
         "pixel_dice_mean_image": float(np.mean(per_image_dice)) if per_image_dice else None,
         "pixel_iou_mean_image": float(np.mean(per_image_iou)) if per_image_iou else None,
+        "bad_pixel_dice_mean_image": float(np.mean(per_bad_image_dice)) if per_bad_image_dice else None,
+        "bad_pixel_iou_mean_image": float(np.mean(per_bad_image_iou)) if per_bad_image_iou else None,
         "pixel_tp": global_tp,
         "pixel_fp": global_fp,
         "pixel_fn": global_fn,
+        "bad_pixel_tp": bad_tp,
+        "bad_pixel_fp": bad_fp,
+        "bad_pixel_fn": bad_fn,
+        "fallback_mask_source": fallback_mask_source,
+        "fallback_used_count": fallback_used_count,
         "image": image_report,
         "unet_image": unet_image_report,
         "patchcore_image": patchcore_image_report,
@@ -1466,9 +1685,33 @@ def evaluate_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "image_blob_weight": args.image_blob_weight,
         "postprocess_min_component_area": args.postprocess_min_component_area,
         "postprocess_object_edge_ignore_px": args.postprocess_object_edge_ignore_px,
+        "fallback_mask_source": args.fallback_mask_source,
+        "fallback_min_unet_area_fraction": args.fallback_min_unet_area_fraction,
+        "fallback_patchcore_percentile": args.fallback_patchcore_percentile,
+        "fallback_patchcore_min_value": args.fallback_patchcore_min_value,
+        "fallback_max_area_fraction": args.fallback_max_area_fraction,
         "image_threshold_min": args.image_threshold_min,
         "image_threshold_max": args.image_threshold_max,
     }
+
+
+def segmentation_checkpoint_score(report: dict[str, Any], mode: str) -> float:
+    if mode == "balanced":
+        image_f1 = float(report.get("unet_image", {}).get("f1", 0.0))
+        return float(report["pixel_dice_global"]) + image_f1
+    if mode == "bad_pixel":
+        return float(report.get("bad_pixel_dice_global", 0.0))
+    if mode == "pixel_iou":
+        return float(report["pixel_iou_global"])
+    return float(report["pixel_dice_global"])
+
+
+def mask_threshold_score(report: dict[str, Any], mode: str) -> float:
+    if mode == "bad_pixel":
+        return float(report.get("bad_pixel_dice_global", 0.0))
+    if mode == "pixel_iou":
+        return float(report["pixel_iou_global"])
+    return float(report["pixel_dice_global"])
 
 
 def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], maps_dir: Path, output_dir: Path) -> dict[str, Any]:
@@ -1498,13 +1741,20 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         if not best_path.exists():
             raise SystemExit(f"Hybrid checkpoint not found for --eval-only: {best_path}")
         checkpoint = load_torch_checkpoint(best_path, device)
+        checkpoint_args = checkpoint.get("args", {}) if isinstance(checkpoint.get("args", {}), dict) else {}
         if "image_size" in checkpoint:
             image_size = tuple(int(v) for v in checkpoint["image_size"])
         map_range = tuple(float(v) for v in checkpoint.get("map_range", compute_map_range(train_samples)))
         base_channels = int(checkpoint.get("base_channels", args.base_channels))
+        seg_arch = str(checkpoint.get("seg_arch") or checkpoint_args.get("seg_arch") or args.seg_arch)
+        seg_encoder = str(checkpoint.get("seg_encoder") or checkpoint_args.get("seg_encoder") or args.seg_encoder)
+        seg_encoder_weights = None
     else:
         map_range = compute_map_range(train_samples)
         base_channels = args.base_channels
+        seg_arch = args.seg_arch
+        seg_encoder = args.seg_encoder
+        seg_encoder_weights = args.seg_encoder_weights
 
     train_loader = make_dataloader(
         train_samples,
@@ -1547,7 +1797,13 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         augment=False,
     )
 
-    model = build_unet(in_channels=4, base_channels=base_channels).to(device)
+    model = build_segmentation_model(
+        in_channels=4,
+        base_channels=base_channels,
+        seg_arch=seg_arch,
+        seg_encoder=seg_encoder,
+        seg_encoder_weights=seg_encoder_weights,
+    ).to(device)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -1567,6 +1823,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     print("[INFO] Hybrid U-Net evaluation" if args.eval_only else "[INFO] Hybrid U-Net training")
     print(f"[INFO] Device       : {device}")
     print(f"[INFO] AMP          : {use_amp}")
+    print(f"[INFO] Seg model    : {seg_arch}" + (f" / {seg_encoder}" if seg_arch != "small_unet" else ""))
     print(f"[INFO] Image size   : {image_size[0]}x{image_size[1]}")
     print(f"[INFO] Map range    : low={map_range[0]:.6f}, high={map_range[1]:.6f}")
     print(f"[INFO] Train samples: {len(train_samples)}")
@@ -1582,6 +1839,14 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             "[INFO] Loss weights : "
             f"BCE={args.bce_weight:.2f}, Dice={args.dice_weight:.2f}, "
             f"Focal={args.focal_weight:.2f}, Tversky={args.tversky_weight:.2f}",
+        )
+        print(f"[INFO] Checkpoint by: {args.checkpoint_selection}")
+        print(f"[INFO] Mask thr by  : {args.mask_threshold_selection}")
+    if args.fallback_mask_source != "none":
+        print(
+            "[INFO] Mask fallback: "
+            f"{args.fallback_mask_source}, p{args.fallback_patchcore_percentile:.2f}, "
+            f"min_unet_area={args.fallback_min_unet_area_fraction:.6f}",
         )
     print("=" * 80)
 
@@ -1615,12 +1880,15 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
                 **evaluate_kwargs(args),
             )
             val_image = val_report["unet_image"]
-            val_score = float(val_report["pixel_dice_global"]) + float(val_image["f1"])
+            val_score = segmentation_checkpoint_score(val_report, args.checkpoint_selection)
             row = {
                 "epoch": epoch,
                 "train_loss": train_loss,
+                "checkpoint_score": val_score,
                 "val_pixel_dice": val_report["pixel_dice_global"],
                 "val_pixel_iou": val_report["pixel_iou_global"],
+                "val_bad_pixel_dice": val_report["bad_pixel_dice_global"],
+                "val_bad_pixel_iou": val_report["bad_pixel_iou_global"],
                 "val_image_f1": val_image["f1"],
                 "val_image_acc": val_image["accuracy"],
                 "val_image_auc": val_image["auc"],
@@ -1628,7 +1896,9 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             history.append(row)
             print(
                 f"[EPOCH {epoch:03d}] loss={train_loss:.4f} "
+                f"score={val_score:.4f} "
                 f"val_dice={float(row['val_pixel_dice']):.4f} "
+                f"val_bad_dice={float(row['val_bad_pixel_dice']):.4f} "
                 f"val_img_f1={float(row['val_image_f1']):.4f} "
                 f"val_acc={float(row['val_image_acc']):.4f}",
                 flush=True,
@@ -1641,6 +1911,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
                         "image_size": image_size,
                         "map_range": map_range,
                         "base_channels": base_channels,
+                        "seg_arch": seg_arch,
+                        "seg_encoder": seg_encoder,
+                        "seg_encoder_weights": args.seg_encoder_weights,
+                        "checkpoint_selection": args.checkpoint_selection,
                         "pos_weight": pos_weight,
                         "args": vars(args),
                     },
@@ -1662,7 +1936,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             patchcore_image_threshold=None,
             **evaluate_kwargs(args),
         )
-        score = float(report["pixel_dice_global"])
+        score = mask_threshold_score(report, args.mask_threshold_selection)
         if score > best_mask_score:
             best_mask_score = score
             best_mask_threshold = float(candidate)
@@ -1719,9 +1993,18 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         "category": args.category,
         "image_size": f"{image_size[0]}x{image_size[1]}",
         "map_range": {"low": map_range[0], "high": map_range[1]},
-        "model": "hybrid_patchcore_unet",
+        "model": "hybrid_patchcore_segmentation",
+        "segmentation_model": {
+            "arch": seg_arch,
+            "encoder": seg_encoder if seg_arch != "small_unet" else None,
+            "encoder_weights": normalize_optional_weight_name(
+                str(checkpoint.get("seg_encoder_weights") or args.seg_encoder_weights) if checkpoint is not None else args.seg_encoder_weights,
+            ),
+            "base_channels": base_channels if seg_arch == "small_unet" else None,
+        },
         "checkpoint": str(best_path),
         "best_mask_threshold": best_mask_threshold,
+        "mask_threshold_selection": args.mask_threshold_selection,
         "image_threshold": final_image_threshold,
         "unet_image_threshold": unet_image_threshold,
         "patchcore_image_threshold": patchcore_image_threshold,
@@ -1738,6 +2021,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             "defect_crop_prob": args.defect_crop_prob,
             "small_defect_oversample": args.small_defect_oversample,
             "small_defect_area_threshold_384": args.small_defect_area_threshold,
+            "checkpoint_selection": args.checkpoint_selection,
             "bce_weight": args.bce_weight,
             "dice_weight": args.dice_weight,
             "focal_weight": args.focal_weight,
@@ -1753,6 +2037,11 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             "image_blob_weight": args.image_blob_weight,
             "min_component_area_384": args.postprocess_min_component_area,
             "object_edge_ignore_px": args.postprocess_object_edge_ignore_px,
+            "fallback_mask_source": args.fallback_mask_source,
+            "fallback_min_unet_area_fraction": args.fallback_min_unet_area_fraction,
+            "fallback_patchcore_percentile": args.fallback_patchcore_percentile,
+            "fallback_patchcore_min_value": args.fallback_patchcore_min_value,
+            "fallback_max_area_fraction": args.fallback_max_area_fraction,
             "image_threshold_min": args.image_threshold_min,
             "image_threshold_max": args.image_threshold_max,
         },
@@ -1811,6 +2100,8 @@ def main() -> None:
         raise SystemExit("--hybrid-batch-size must be positive.")
     if args.base_channels <= 0:
         raise SystemExit("--base-channels must be positive.")
+    if not args.seg_encoder.strip():
+        raise SystemExit("--seg-encoder must not be empty.")
     if args.hybrid_train_crop_size < 0:
         raise SystemExit("--hybrid-train-crop-size must be non-negative.")
     if args.hybrid_train_crop_size > 0 and args.hybrid_train_crop_size < 64:
@@ -1839,6 +2130,14 @@ def main() -> None:
         raise SystemExit("--postprocess-min-component-area must be non-negative.")
     if args.postprocess_object_edge_ignore_px < 0:
         raise SystemExit("--postprocess-object-edge-ignore-px must be non-negative.")
+    if args.fallback_min_unet_area_fraction < 0.0:
+        raise SystemExit("--fallback-min-unet-area-fraction must be non-negative.")
+    if not 0.0 <= args.fallback_patchcore_percentile <= 100.0:
+        raise SystemExit("--fallback-patchcore-percentile must be between 0 and 100.")
+    if args.fallback_patchcore_min_value < 0.0:
+        raise SystemExit("--fallback-patchcore-min-value must be non-negative.")
+    if args.fallback_max_area_fraction < 0.0:
+        raise SystemExit("--fallback-max-area-fraction must be non-negative.")
     if (
         args.image_threshold_min is not None
         and args.image_threshold_max is not None

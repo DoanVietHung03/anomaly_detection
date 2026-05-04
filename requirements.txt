@@ -3,3 +3,5 @@ pandas>=2,<3
 pillow>=10.0
 opencv-python>=4.8
 numpy>=2.0
+segmentation-models-pytorch>=0.3.4
+timm>=0.9
