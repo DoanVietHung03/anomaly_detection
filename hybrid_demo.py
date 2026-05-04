@@ -136,8 +136,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--patchcore-score-column",
         choices=["model_pred_score", "pred_score"],
-        default="model_pred_score",
+        default="pred_score",
         help="PatchCore score column from generated predictions.csv used for image-level gating.",
+    )
+    parser.add_argument(
+        "--patchcore-threshold-min-recall",
+        type=float,
+        default=0.90,
+        help="Minimum validation recall preferred when choosing the PatchCore image threshold.",
+    )
+    parser.add_argument(
+        "--patchcore-threshold-min-specificity",
+        type=float,
+        default=0.92,
+        help="Minimum validation specificity preferred when choosing the PatchCore image threshold.",
     )
     parser.add_argument(
         "--image-p99-weight",
@@ -1052,9 +1064,12 @@ def image_metrics(
     threshold: float | None = None,
     threshold_min: float | None = None,
     threshold_max: float | None = None,
+    min_recall: float | None = None,
+    min_specificity: float | None = None,
 ) -> dict[str, Any]:
     if threshold is None:
         best: dict[str, Any] | None = None
+        best_constrained: dict[str, Any] | None = None
         candidates = set(threshold_candidates(scores))
         if threshold_min is not None:
             candidates.add(float(threshold_min))
@@ -1069,10 +1084,46 @@ def image_metrics(
             score = (metrics["f1"], metrics["balanced_accuracy"], metrics["accuracy"])
             if best is None or score > (best["f1"], best["balanced_accuracy"], best["accuracy"]):
                 best = metrics
+            recall_ok = min_recall is None or metrics["recall"] >= min_recall
+            specificity_ok = min_specificity is None or metrics["specificity"] >= min_specificity
+            if recall_ok and specificity_ok:
+                constrained_score = (
+                    metrics["f1"],
+                    metrics["specificity"],
+                    metrics["recall"],
+                    metrics["balanced_accuracy"],
+                    metrics["accuracy"],
+                )
+                if best_constrained is None:
+                    best_constrained = metrics
+                else:
+                    best_score = (
+                        best_constrained["f1"],
+                        best_constrained["specificity"],
+                        best_constrained["recall"],
+                        best_constrained["balanced_accuracy"],
+                        best_constrained["accuracy"],
+                    )
+                    if constrained_score > best_score:
+                        best_constrained = metrics
+        if best_constrained is not None:
+            best_constrained = dict(best_constrained)
+            best_constrained["threshold_selection"] = "constrained"
+            best_constrained["threshold_min_recall"] = min_recall
+            best_constrained["threshold_min_specificity"] = min_specificity
+            return best_constrained
         if best is not None:
+            best = dict(best)
+            best["threshold_selection"] = "best_f1_fallback"
+            best["threshold_min_recall"] = min_recall
+            best["threshold_min_specificity"] = min_specificity
             return best
         fallback = threshold_min if threshold_min is not None else threshold_max
-        return image_metrics(labels, scores, 0.5 if fallback is None else float(fallback))
+        metrics = image_metrics(labels, scores, 0.5 if fallback is None else float(fallback))
+        metrics["threshold_selection"] = "fallback"
+        metrics["threshold_min_recall"] = min_recall
+        metrics["threshold_min_specificity"] = min_specificity
+        return metrics
 
     tp = fp = tn = fn = 0
     for label, score in zip(labels, scores):
@@ -1103,6 +1154,9 @@ def image_metrics(
         "fp": fp,
         "tn": tn,
         "fn": fn,
+        "threshold_selection": "fixed",
+        "threshold_min_recall": min_recall,
+        "threshold_min_specificity": min_specificity,
     }
 
 
@@ -1137,6 +1191,8 @@ def evaluate_model(
     patchcore_image_threshold: float | None,
     image_decision_source: str,
     patchcore_score_column: str,
+    patchcore_threshold_min_recall: float | None,
+    patchcore_threshold_min_specificity: float | None,
     image_score_mode: str,
     image_p99_weight: float,
     image_area_weight: float,
@@ -1269,7 +1325,17 @@ def evaluate_model(
                 )
 
     unet_image_report = image_metrics(labels, unet_scores, image_threshold, image_threshold_min, image_threshold_max) if labels else {}
-    patchcore_image_report = image_metrics(labels, patchcore_scores, patchcore_image_threshold) if labels else {}
+    patchcore_image_report = (
+        image_metrics(
+            labels,
+            patchcore_scores,
+            patchcore_image_threshold,
+            min_recall=patchcore_threshold_min_recall,
+            min_specificity=patchcore_threshold_min_specificity,
+        )
+        if labels
+        else {}
+    )
     image_report = patchcore_image_report if image_decision_source == "patchcore" else unet_image_report
     report = {
         "num_samples": len(labels),
@@ -1279,6 +1345,8 @@ def evaluate_model(
         "patchcore_image_threshold": patchcore_image_threshold,
         "image_decision_source": image_decision_source,
         "patchcore_score_column": patchcore_score_column,
+        "patchcore_threshold_min_recall": patchcore_threshold_min_recall,
+        "patchcore_threshold_min_specificity": patchcore_threshold_min_specificity,
         "image_score_mode": image_score_mode,
         "image_p99_weight": image_p99_weight,
         "image_area_weight": image_area_weight,
@@ -1390,6 +1458,8 @@ def evaluate_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "image_decision_source": args.image_decision_source,
         "patchcore_score_column": args.patchcore_score_column,
+        "patchcore_threshold_min_recall": args.patchcore_threshold_min_recall,
+        "patchcore_threshold_min_specificity": args.patchcore_threshold_min_specificity,
         "image_score_mode": args.image_score_mode,
         "image_p99_weight": args.image_p99_weight,
         "image_area_weight": args.image_area_weight,
@@ -1657,6 +1727,11 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         "patchcore_image_threshold": patchcore_image_threshold,
         "image_decision_source": args.image_decision_source,
         "patchcore_score_column": args.patchcore_score_column,
+        "patchcore_threshold_policy": {
+            "min_recall": args.patchcore_threshold_min_recall,
+            "min_specificity": args.patchcore_threshold_min_specificity,
+            "selection": val_report_for_threshold["patchcore_image"].get("threshold_selection"),
+        },
         "image_score_mode": args.image_score_mode,
         "training": {
             "train_crop_size": args.hybrid_train_crop_size,
@@ -1696,6 +1771,12 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     print(f"[INFO] Image threshold : {final_image_threshold:.6f}")
     print(f"[INFO] U-Net threshold : {unet_image_threshold:.6f}")
     print(f"[INFO] PatchCore thr   : {patchcore_image_threshold:.6f}")
+    print(
+        "[INFO] PatchCore policy: "
+        f"recall>={args.patchcore_threshold_min_recall:.3f}, "
+        f"specificity>={args.patchcore_threshold_min_specificity:.3f}, "
+        f"selection={val_report_for_threshold['patchcore_image'].get('threshold_selection')}",
+    )
     print(f"[INFO] Test image acc  : {test_report['image']['accuracy']:.4f}")
     print(f"[INFO] Test image F1   : {test_report['image']['f1']:.4f}")
     print(f"[INFO] Test image AUC  : {test_report['image']['auc']}")
@@ -1748,6 +1829,10 @@ def main() -> None:
         raise SystemExit("--focal-gamma must be non-negative.")
     if args.tversky_alpha < 0.0 or args.tversky_beta < 0.0:
         raise SystemExit("--tversky-alpha and --tversky-beta must be non-negative.")
+    if not 0.0 <= args.patchcore_threshold_min_recall <= 1.0:
+        raise SystemExit("--patchcore-threshold-min-recall must be between 0 and 1.")
+    if not 0.0 <= args.patchcore_threshold_min_specificity <= 1.0:
+        raise SystemExit("--patchcore-threshold-min-specificity must be between 0 and 1.")
     if args.image_p99_weight < 0.0 or args.image_area_weight < 0.0 or args.image_blob_weight < 0.0:
         raise SystemExit("Image score weights must be non-negative.")
     if args.postprocess_min_component_area < 0:
