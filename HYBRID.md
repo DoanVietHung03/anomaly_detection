@@ -1,6 +1,6 @@
 # Hybrid PatchCore + Supervised Segmentation on VisA
 
-`hybrid_demo.py` adds a supervised stage without changing the existing PatchCore, PaDiM, or FastFlow scripts.
+`hybrid_demo.py` adds a supervised stage on top of the existing PatchCore workflow.
 
 Workflow:
 

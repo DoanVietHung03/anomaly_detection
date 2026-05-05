@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """Train an anomaly detection demo on MVTec AD 2 / can.
 
-This script focuses on a minimal, reproducible training flow for:
-- PatchCore
-- PaDiM
-- FastFlow
-
+This script focuses on a minimal, reproducible PatchCore training flow.
 It trains on defect-free data and evaluates on the public test split.
 """
 
@@ -36,12 +32,6 @@ DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
-DEFAULT_PADIM_BACKBONE = "resnet18"
-DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
-DEFAULT_PADIM_N_FEATURES = 100
-DEFAULT_FASTFLOW_BACKBONE = "resnet18"
-DEFAULT_FASTFLOW_FLOW_STEPS = 8
-DEFAULT_FASTFLOW_HIDDEN_RATIO = 1.0
 
 
 class SafeMVTecAD2(_MVTecAD2Base):
@@ -88,8 +78,8 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "padim", "fastflow"],
-        help="Model to train.",
+        choices=["patchcore"],
+        help="Model to train. Only PatchCore is supported.",
     )
     parser.add_argument("--results-dir", type=Path, default=Path("./runs"), help="Output directory.")
     parser.add_argument("--epochs", type=int, default=30, help="Training epochs.")
@@ -143,46 +133,6 @@ def parse_args() -> argparse.Namespace:
         help="PatchCore compute precision. float16 is the memory-safe default; use float32 only if memory allows.",
     )
     parser.add_argument(
-        "--padim-backbone",
-        default=DEFAULT_PADIM_BACKBONE,
-        help="PaDiM feature backbone. resnet18 is the real-time friendly default.",
-    )
-    parser.add_argument(
-        "--padim-layers",
-        nargs="+",
-        default=list(DEFAULT_PADIM_LAYERS),
-        choices=["layer1", "layer2", "layer3", "layer4"],
-        help="PaDiM feature layers. layer1+layer2+layer3 is the balanced default.",
-    )
-    parser.add_argument(
-        "--padim-n-features",
-        type=int,
-        default=DEFAULT_PADIM_N_FEATURES,
-        help="PaDiM retained feature dimensions. 100 matches the resnet18 paper default and is A4000-friendly.",
-    )
-    parser.add_argument(
-        "--fastflow-backbone",
-        default=DEFAULT_FASTFLOW_BACKBONE,
-        help="FastFlow feature backbone. resnet18 is the A4000-friendly default.",
-    )
-    parser.add_argument(
-        "--fastflow-flow-steps",
-        type=int,
-        default=DEFAULT_FASTFLOW_FLOW_STEPS,
-        help="FastFlow normalizing-flow steps.",
-    )
-    parser.add_argument(
-        "--fastflow-conv3x3-only",
-        action="store_true",
-        help="Use only 3x3 convolutions in FastFlow coupling blocks.",
-    )
-    parser.add_argument(
-        "--fastflow-hidden-ratio",
-        type=float,
-        default=DEFAULT_FASTFLOW_HIDDEN_RATIO,
-        help="FastFlow hidden channel ratio.",
-    )
-    parser.add_argument(
         "--test-type",
         type=str,
         default="public",
@@ -218,7 +168,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
         from anomalib.data import MVTecAD2, Visa
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
-        from anomalib.models import Fastflow, Padim, Patchcore
+        from anomalib.models import Patchcore
         from lightning.pytorch import seed_everything
         from lightning.pytorch.loggers import CSVLogger
     except Exception as exc:  # pragma: no cover - runtime safeguard
@@ -227,7 +177,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return (MVTecAD2, Visa), Engine, (Patchcore, Padim, Fastflow), seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
+    return (MVTecAD2, Visa), Engine, Patchcore, seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
@@ -307,38 +257,6 @@ def build_tiling_callbacks(
     ]
 
 
-def build_model(model_name: str, patchcore_cls: Any, padim_cls: Any, fastflow_cls: Any, image_size: tuple[int, int]) -> Any:
-    pre_processor_size = image_size
-    if model_name == "patchcore":
-        model = patchcore_cls(
-            backbone="wide_resnet50_2",
-            layers=DEFAULT_PATCHCORE_LAYERS,
-            coreset_sampling_ratio=DEFAULT_PATCHCORE_CORESET_RATIO,
-            num_neighbors=DEFAULT_PATCHCORE_NUM_NEIGHBORS,
-            precision=DEFAULT_PATCHCORE_PRECISION,
-            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-        return model
-    if model_name == "padim":
-        return padim_cls(
-            backbone=DEFAULT_PADIM_BACKBONE,
-            layers=list(DEFAULT_PADIM_LAYERS),
-            pre_trained=True,
-            n_features=DEFAULT_PADIM_N_FEATURES,
-            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    if model_name == "fastflow":
-        return fastflow_cls(
-            backbone=DEFAULT_FASTFLOW_BACKBONE,
-            pre_trained=True,
-            flow_steps=DEFAULT_FASTFLOW_FLOW_STEPS,
-            conv3x3_only=False,
-            hidden_ratio=DEFAULT_FASTFLOW_HIDDEN_RATIO,
-            pre_processor=fastflow_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    raise ValueError(f"Unsupported model: {model_name}")
-
-
 def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
     layers = tuple(dict.fromkeys(args.patchcore_layers))
     if not layers:
@@ -350,61 +268,21 @@ def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
     return layers
 
 
-def validate_padim_args(args: argparse.Namespace) -> tuple[str, ...]:
-    layers = tuple(dict.fromkeys(args.padim_layers))
-    if not layers:
-        raise SystemExit("--padim-layers must include at least one layer.")
-    if args.padim_n_features <= 0:
-        raise SystemExit("--padim-n-features must be a positive integer.")
-    return layers
-
-
-def validate_fastflow_args(args: argparse.Namespace) -> None:
-    if args.fastflow_flow_steps <= 0:
-        raise SystemExit("--fastflow-flow-steps must be a positive integer.")
-    if args.fastflow_hidden_ratio <= 0.0:
-        raise SystemExit("--fastflow-hidden-ratio must be positive.")
-
-
 def build_model_from_args(
     args: argparse.Namespace,
     patchcore_cls: Any,
-    padim_cls: Any,
-    fastflow_cls: Any,
     image_size: tuple[int, int],
 ) -> Any:
     pre_processor_size = image_size
-    if args.model == "patchcore":
-        layers = validate_patchcore_args(args)
-        model = patchcore_cls(
-            backbone="wide_resnet50_2",
-            layers=layers,
-            coreset_sampling_ratio=args.patchcore_coreset_ratio,
-            num_neighbors=args.patchcore_num_neighbors,
-            precision=args.patchcore_precision,
-            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-        return model
-    if args.model == "padim":
-        layers = validate_padim_args(args)
-        return padim_cls(
-            backbone=args.padim_backbone,
-            layers=list(layers),
-            pre_trained=True,
-            n_features=args.padim_n_features,
-            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    if args.model == "fastflow":
-        validate_fastflow_args(args)
-        return fastflow_cls(
-            backbone=args.fastflow_backbone,
-            pre_trained=True,
-            flow_steps=args.fastflow_flow_steps,
-            conv3x3_only=args.fastflow_conv3x3_only,
-            hidden_ratio=args.fastflow_hidden_ratio,
-            pre_processor=fastflow_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    return build_model(args.model, patchcore_cls, padim_cls, fastflow_cls, image_size)
+    layers = validate_patchcore_args(args)
+    return patchcore_cls(
+        backbone="wide_resnet50_2",
+        layers=layers,
+        coreset_sampling_ratio=args.patchcore_coreset_ratio,
+        num_neighbors=args.patchcore_num_neighbors,
+        precision=args.patchcore_precision,
+        pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
+    )
 
 
 def normalize_variant_selection(variants: Iterable[str] | None) -> set[str] | None:
@@ -523,9 +401,6 @@ def print_threshold_warning(summary: dict[str, dict[str, int]]) -> None:
 
 
 def print_patchcore_profile_warnings(args: argparse.Namespace, image_size: tuple[int, int], tiling_config: dict[str, Any]) -> None:
-    if args.model != "patchcore":
-        return
-
     layers = set(validate_patchcore_args(args))
     if "layer3" not in layers:
         print("[WARN] PatchCore is running without layer3; image-level scores may miss broader object context.")
@@ -571,14 +446,13 @@ def main() -> None:
     (
         datamodule_classes,
         engine_cls,
-        model_classes,
+        patchcore_cls,
         seed_everything,
         csv_logger_cls,
         tiler_callback_cls,
         upscale_mode_cls,
     ) = import_dependencies()
     mvtec_ad2_cls, visa_cls = datamodule_classes
-    patchcore_cls, padim_cls, fastflow_cls = model_classes
     safe_mvtec_ad2_cls = make_safe_mvtec_ad2_cls(mvtec_ad2_cls)
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
@@ -593,7 +467,7 @@ def main() -> None:
 
     train_batch_size = args.train_batch_size
     if train_batch_size is None:
-        train_batch_size = 8 if args.model == "padim" else 1
+        train_batch_size = 1
 
     if args.dataset == "visa":
         datamodule = visa_cls(
@@ -616,14 +490,14 @@ def main() -> None:
             seed=args.seed,
         )
 
-    model = build_model_from_args(args, patchcore_cls, padim_cls, fastflow_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, image_size)
     csv_logger = csv_logger_cls(
         save_dir=str(args.results_dir / "logs"),
         name=f"{args.model}_{args.category}",
     )
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
 
-    precision_flag = "16-true" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
+    precision_flag = "16-true" if args.patchcore_precision == "float16" else "32"
 
     engine = engine_cls(
         callbacks=callbacks,
@@ -643,20 +517,9 @@ def main() -> None:
     print(f"[INFO] model       : {args.model}")
     print(f"[INFO] image_size  : {format_image_size(image_size)}")
     print(f"[INFO] tiling      : {tiling_config}")
-    if args.model == "patchcore":
-        print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
-        print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
-        print(f"[INFO] precision   : {args.patchcore_precision}")
-    if args.model == "padim":
-        print(f"[INFO] backbone    : {args.padim_backbone}")
-        print(f"[INFO] layers      : {','.join(validate_padim_args(args))}")
-        print(f"[INFO] n_features  : {args.padim_n_features}")
-    if args.model == "fastflow":
-        validate_fastflow_args(args)
-        print(f"[INFO] backbone    : {args.fastflow_backbone}")
-        print(f"[INFO] flow_steps  : {args.fastflow_flow_steps}")
-        print(f"[INFO] conv3x3     : {args.fastflow_conv3x3_only}")
-        print(f"[INFO] hidden_ratio: {args.fastflow_hidden_ratio}")
+    print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
+    print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
+    print(f"[INFO] precision   : {args.patchcore_precision}")
     if args.dataset != "visa":
         print(f"[INFO] test_type   : {args.test_type}")
         print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
@@ -699,17 +562,10 @@ def main() -> None:
         "image_height": image_size[0],
         "image_width": image_size[1],
         "tiling": tiling_config,
-        "patchcore_layers": list(validate_patchcore_args(args)) if args.model == "patchcore" else None,
-        "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
-        "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
-        "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
-        "padim_backbone": args.padim_backbone if args.model == "padim" else None,
-        "padim_layers": list(validate_padim_args(args)) if args.model == "padim" else None,
-        "padim_n_features": args.padim_n_features if args.model == "padim" else None,
-        "fastflow_backbone": args.fastflow_backbone if args.model == "fastflow" else None,
-        "fastflow_flow_steps": args.fastflow_flow_steps if args.model == "fastflow" else None,
-        "fastflow_conv3x3_only": args.fastflow_conv3x3_only if args.model == "fastflow" else None,
-        "fastflow_hidden_ratio": args.fastflow_hidden_ratio if args.model == "fastflow" else None,
+        "patchcore_layers": list(validate_patchcore_args(args)),
+        "patchcore_coreset_ratio": args.patchcore_coreset_ratio,
+        "patchcore_num_neighbors": args.patchcore_num_neighbors,
+        "patchcore_precision": args.patchcore_precision,
         "train_batch_size": train_batch_size,
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,

@@ -21,12 +21,6 @@ from PIL import Image
 
 from train_demo import (
     DATASET_CHOICES,
-    DEFAULT_FASTFLOW_BACKBONE,
-    DEFAULT_FASTFLOW_FLOW_STEPS,
-    DEFAULT_FASTFLOW_HIDDEN_RATIO,
-    DEFAULT_PADIM_BACKBONE,
-    DEFAULT_PADIM_LAYERS,
-    DEFAULT_PADIM_N_FEATURES,
     DEFAULT_PATCHCORE_CORESET_RATIO,
     DEFAULT_PATCHCORE_LAYERS,
     DEFAULT_PATCHCORE_NUM_NEIGHBORS,
@@ -37,8 +31,6 @@ from train_demo import (
     format_image_size,
     resolve_image_size,
     resolve_tiling,
-    validate_fastflow_args,
-    validate_padim_args,
     validate_patchcore_args,
 )
 
@@ -83,8 +75,8 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "padim", "fastflow"],
-        help="Model architecture used by the checkpoint.",
+        choices=["patchcore"],
+        help="Model architecture used by the checkpoint. Only PatchCore is supported.",
     )
     parser.add_argument(
         "--dataset-root",
@@ -143,7 +135,7 @@ def parse_args() -> argparse.Namespace:
         "--roi-mode",
         choices=ROI_MODE_CHOICES,
         default=None,
-        help="Restrict score aggregation. Defaults to foreground for PaDiM and fixed-foreground for PatchCore.",
+        help="Restrict score aggregation. Defaults to fixed-foreground for PatchCore.",
     )
     parser.add_argument(
         "--fixed-roi",
@@ -157,7 +149,7 @@ def parse_args() -> argparse.Namespace:
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
         default=None,
-        help="Image score aggregation. Defaults to pixel-percentile for PaDiM and pixel-mean for PatchCore.",
+        help="Image score aggregation. Defaults to pixel-mean for PatchCore.",
     )
     parser.add_argument(
         "--score-percentile",
@@ -240,46 +232,6 @@ def parse_args() -> argparse.Namespace:
         help="PatchCore compute precision. Must match the trained checkpoint.",
     )
     parser.add_argument(
-        "--padim-backbone",
-        default=DEFAULT_PADIM_BACKBONE,
-        help="PaDiM feature backbone. Must match the trained checkpoint.",
-    )
-    parser.add_argument(
-        "--padim-layers",
-        nargs="+",
-        default=list(DEFAULT_PADIM_LAYERS),
-        choices=["layer1", "layer2", "layer3", "layer4"],
-        help="PaDiM feature layers. Must match the trained checkpoint.",
-    )
-    parser.add_argument(
-        "--padim-n-features",
-        type=int,
-        default=DEFAULT_PADIM_N_FEATURES,
-        help="PaDiM retained feature dimensions. Must match the trained checkpoint.",
-    )
-    parser.add_argument(
-        "--fastflow-backbone",
-        default=DEFAULT_FASTFLOW_BACKBONE,
-        help="FastFlow feature backbone. Must match the trained checkpoint.",
-    )
-    parser.add_argument(
-        "--fastflow-flow-steps",
-        type=int,
-        default=DEFAULT_FASTFLOW_FLOW_STEPS,
-        help="FastFlow normalizing-flow steps. Must match the trained checkpoint.",
-    )
-    parser.add_argument(
-        "--fastflow-conv3x3-only",
-        action="store_true",
-        help="Use only 3x3 convolutions in FastFlow coupling blocks. Must match the trained checkpoint.",
-    )
-    parser.add_argument(
-        "--fastflow-hidden-ratio",
-        type=float,
-        default=DEFAULT_FASTFLOW_HIDDEN_RATIO,
-        help="FastFlow hidden channel ratio. Must match the trained checkpoint.",
-    )
-    parser.add_argument(
         "--heatmap-normalization",
         choices=["global", "per-image"],
         default="global",
@@ -290,20 +242,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+def import_dependencies() -> tuple[Any, Any, Any, Any, Any]:
     try:
         from anomalib.callbacks import TilerConfigurationCallback
         from anomalib.data import PredictDataset
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
-        from anomalib.models import Fastflow, Padim, Patchcore
+        from anomalib.models import Patchcore
     except Exception as exc:  # pragma: no cover - runtime safeguard
         raise SystemExit(
             "Failed to import Anomalib stack. Install dependencies first, for example:\n"
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return PredictDataset, Engine, Patchcore, Padim, Fastflow, TilerConfigurationCallback, ImageUpscaleMode
+    return PredictDataset, Engine, Patchcore, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def install_checkpoint_compatibility_aliases() -> None:
@@ -326,16 +278,12 @@ def find_checkpoint(results_dir: Path) -> Path | None:
     return preferred[0] if preferred else ckpts[0]
 
 
-def default_score_aggregation(model_name: str) -> str:
-    if model_name == "padim":
-        return "pixel-percentile"
-    if model_name == "fastflow":
-        return "model"
+def default_score_aggregation() -> str:
     return "pixel-mean"
 
 
-def default_roi_mode(model_name: str) -> str:
-    return "foreground" if model_name in {"padim", "fastflow"} else "fixed-foreground"
+def default_roi_mode() -> str:
+    return "fixed-foreground"
 
 
 def flatten_predictions(predictions: Any) -> list[Any]:
@@ -1130,16 +1078,14 @@ def main() -> None:
         predict_dataset_cls,
         engine_cls,
         patchcore_cls,
-        padim_cls,
-        fastflow_cls,
         tiler_callback_cls,
         upscale_mode_cls,
     ) = import_dependencies()
     install_checkpoint_compatibility_aliases()
     image_size = resolve_image_size(args)
     if args.score_aggregation is None:
-        args.score_aggregation = default_score_aggregation(args.model)
-    args.roi_mode = args.roi_mode or default_roi_mode(args.model)
+        args.score_aggregation = default_score_aggregation()
+    args.roi_mode = args.roi_mode or default_roi_mode()
     fixed_roi = validate_fixed_roi(args.fixed_roi)
     tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
 
@@ -1197,10 +1143,10 @@ def main() -> None:
     ):
         d.mkdir(parents=True, exist_ok=True)
 
-    model = build_model_from_args(args, patchcore_cls, padim_cls, fastflow_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, image_size)
     configure_score_mode(model, args.score_mode)
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
-    precision_flag = "16-true" if (args.model == "patchcore" and getattr(args, "patchcore_precision", "") == "float16") else "32"
+    precision_flag = "16-true" if args.patchcore_precision == "float16" else "32"
     engine = engine_cls(
         callbacks=callbacks,
         accelerator=args.accelerator,
@@ -1383,7 +1329,7 @@ def main() -> None:
     if score_auc_value is not None and float(score_auc_value) < 0.6:
         print(
             "[WARN] Prediction scores have weak good/bad separation "
-            f"(AUC={float(score_auc_value):.3f}). Try a larger aspect-preserving image size or a different model.",
+            f"(AUC={float(score_auc_value):.3f}). Try a larger aspect-preserving image size or different PatchCore settings.",
         )
 
     csv_path = args.output_dir / "predictions.csv"
@@ -1407,17 +1353,10 @@ def main() -> None:
         "image_height": image_size[0],
         "image_width": image_size[1],
         "tiling": tiling_config,
-        "patchcore_layers": list(validate_patchcore_args(args)) if args.model == "patchcore" else None,
-        "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
-        "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
-        "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
-        "padim_backbone": args.padim_backbone if args.model == "padim" else None,
-        "padim_layers": list(validate_padim_args(args)) if args.model == "padim" else None,
-        "padim_n_features": args.padim_n_features if args.model == "padim" else None,
-        "fastflow_backbone": args.fastflow_backbone if args.model == "fastflow" else None,
-        "fastflow_flow_steps": args.fastflow_flow_steps if args.model == "fastflow" else None,
-        "fastflow_conv3x3_only": args.fastflow_conv3x3_only if args.model == "fastflow" else None,
-        "fastflow_hidden_ratio": args.fastflow_hidden_ratio if args.model == "fastflow" else None,
+        "patchcore_layers": list(validate_patchcore_args(args)),
+        "patchcore_coreset_ratio": args.patchcore_coreset_ratio,
+        "patchcore_num_neighbors": args.patchcore_num_neighbors,
+        "patchcore_precision": args.patchcore_precision,
         "score_mode": args.score_mode,
         "score_aggregation": args.score_aggregation,
         "score_percentile": args.score_percentile,
@@ -1449,20 +1388,9 @@ def main() -> None:
     print(f"[INFO] Checkpoint : {ckpt_path}")
     print(f"[INFO] Image size : {format_image_size(image_size)}")
     print(f"[INFO] Tiling     : {tiling_config}")
-    if args.model == "patchcore":
-        print(f"[INFO] Layers     : {','.join(validate_patchcore_args(args))}")
-        print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
-        print(f"[INFO] Precision  : {args.patchcore_precision}")
-    if args.model == "padim":
-        print(f"[INFO] Backbone   : {args.padim_backbone}")
-        print(f"[INFO] Layers     : {','.join(validate_padim_args(args))}")
-        print(f"[INFO] Features   : {args.padim_n_features}")
-    if args.model == "fastflow":
-        validate_fastflow_args(args)
-        print(f"[INFO] Backbone   : {args.fastflow_backbone}")
-        print(f"[INFO] Flow steps : {args.fastflow_flow_steps}")
-        print(f"[INFO] Conv3x3    : {args.fastflow_conv3x3_only}")
-        print(f"[INFO] Hidden     : {args.fastflow_hidden_ratio}")
+    print(f"[INFO] Layers     : {','.join(validate_patchcore_args(args))}")
+    print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
+    print(f"[INFO] Precision  : {args.patchcore_precision}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
     if args.score_aggregation in {"blob-count", "blob-score"}:

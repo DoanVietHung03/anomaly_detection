@@ -15,12 +15,6 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from train_demo import (
     DATASET_CHOICES,
-    DEFAULT_FASTFLOW_BACKBONE,
-    DEFAULT_FASTFLOW_FLOW_STEPS,
-    DEFAULT_FASTFLOW_HIDDEN_RATIO,
-    DEFAULT_PADIM_BACKBONE,
-    DEFAULT_PADIM_LAYERS,
-    DEFAULT_PADIM_N_FEATURES,
     DEFAULT_PATCHCORE_CORESET_RATIO,
     DEFAULT_PATCHCORE_LAYERS,
     DEFAULT_PATCHCORE_NUM_NEIGHBORS,
@@ -74,8 +68,8 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore", "padim", "fastflow"],
-        help="Model architecture to train and run.",
+        choices=["patchcore"],
+        help="Model architecture to train and run. Only PatchCore is supported.",
     )
     parser.add_argument("--results-dir", type=Path, default=None, help="Training output directory.")
     parser.add_argument("--input-dir", type=Path, default=Path("./demo_inputs"), help="Prepared demo input directory.")
@@ -86,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         help="Prepared calibration input directory used for threshold selection.",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="Inference output directory.")
-    parser.add_argument("--epochs", type=int, default=None, help="Training epochs. Defaults by model.")
+    parser.add_argument("--epochs", type=int, default=None, help="Training epochs. Defaults to 1.")
     parser.add_argument("--num-good", type=int, default=8, help="Number of good demo images to sample.")
     parser.add_argument("--num-bad", type=int, default=8, help="Number of anomalous demo images to sample.")
     parser.add_argument("--num-calibration-good", type=int, default=30, help="Number of good calibration images to sample.")
@@ -135,46 +129,6 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_PATCHCORE_PRECISION,
         help="PatchCore compute precision. float16 is the memory-safe default; use float32 only if memory allows.",
     )
-    parser.add_argument(
-        "--padim-backbone",
-        default=DEFAULT_PADIM_BACKBONE,
-        help="PaDiM feature backbone. resnet18 is the real-time friendly default.",
-    )
-    parser.add_argument(
-        "--padim-layers",
-        nargs="+",
-        default=list(DEFAULT_PADIM_LAYERS),
-        choices=["layer1", "layer2", "layer3", "layer4"],
-        help="PaDiM feature layers. layer1+layer2+layer3 is the balanced default.",
-    )
-    parser.add_argument(
-        "--padim-n-features",
-        type=int,
-        default=DEFAULT_PADIM_N_FEATURES,
-        help="PaDiM retained feature dimensions. 100 matches the resnet18 paper default and is A4000-friendly.",
-    )
-    parser.add_argument(
-        "--fastflow-backbone",
-        default=DEFAULT_FASTFLOW_BACKBONE,
-        help="FastFlow feature backbone. resnet18 is the A4000-friendly default.",
-    )
-    parser.add_argument(
-        "--fastflow-flow-steps",
-        type=int,
-        default=DEFAULT_FASTFLOW_FLOW_STEPS,
-        help="FastFlow normalizing-flow steps.",
-    )
-    parser.add_argument(
-        "--fastflow-conv3x3-only",
-        action="store_true",
-        help="Use only 3x3 convolutions in FastFlow coupling blocks.",
-    )
-    parser.add_argument(
-        "--fastflow-hidden-ratio",
-        type=float,
-        default=DEFAULT_FASTFLOW_HIDDEN_RATIO,
-        help="FastFlow hidden channel ratio.",
-    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
     parser.add_argument(
         "--skip-calibration",
@@ -217,7 +171,7 @@ def parse_args() -> argparse.Namespace:
         "--roi-mode",
         choices=ROI_MODE_CHOICES,
         default=None,
-        help="Restrict inference score aggregation. Defaults to foreground for PaDiM and fixed-foreground for PatchCore.",
+        help="Restrict inference score aggregation. Defaults to fixed-foreground for PatchCore.",
     )
     parser.add_argument(
         "--fixed-roi",
@@ -231,7 +185,7 @@ def parse_args() -> argparse.Namespace:
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
         default=None,
-        help="Image score aggregation used by infer_demo.py. Defaults to pixel-percentile for PaDiM and pixel-mean for PatchCore.",
+        help="Image score aggregation used by infer_demo.py. Defaults to pixel-mean for PatchCore.",
     )
     parser.add_argument(
         "--calibration-objective",
@@ -288,26 +242,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def default_epochs(model: str) -> int:
-    if model == "fastflow":
-        return 50
+def default_epochs() -> int:
     return 1
 
 
-def default_score_aggregation(model: str) -> str:
-    if model == "padim":
-        return "pixel-percentile"
-    if model == "fastflow":
-        return "model"
+def default_score_aggregation() -> str:
     return "pixel-mean"
 
 
-def default_roi_mode(model: str) -> str:
-    return "foreground" if model in {"padim", "fastflow"} else "fixed-foreground"
+def default_roi_mode() -> str:
+    return "fixed-foreground"
 
 
-def default_train_batch_size(model: str) -> int:
-    return 8 if model in {"padim", "fastflow"} else 1
+def default_train_batch_size() -> int:
+    return 1
 
 
 def validate_fixed_roi(values: list[float] | tuple[float, ...]) -> tuple[float, float, float, float]:
@@ -462,21 +410,15 @@ def main() -> None:
     calibration_dir = project_path(args.calibration_dir, project_root)
     output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}"), project_root)
     image_size = resolve_image_size(args)
-    args.roi_mode = args.roi_mode or default_roi_mode(args.model)
+    args.roi_mode = args.roi_mode or default_roi_mode()
     fixed_roi = validate_fixed_roi(args.fixed_roi)
     if args.score_blob_min_area <= 0:
         raise SystemExit("--score-blob-min-area must be a positive integer.")
     if args.score_blob_area_weight < 0.0:
         raise SystemExit("--score-blob-area-weight must be non-negative.")
-    if args.padim_n_features <= 0:
-        raise SystemExit("--padim-n-features must be a positive integer.")
-    if args.fastflow_flow_steps <= 0:
-        raise SystemExit("--fastflow-flow-steps must be a positive integer.")
-    if args.fastflow_hidden_ratio <= 0.0:
-        raise SystemExit("--fastflow-hidden-ratio must be positive.")
-    epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
-    score_aggregation = args.score_aggregation or default_score_aggregation(args.model)
-    default_batch_size = default_train_batch_size(args.model)
+    epochs = args.epochs if args.epochs is not None else default_epochs()
+    score_aggregation = args.score_aggregation or default_score_aggregation()
+    default_batch_size = default_train_batch_size()
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
     demo_variants = args.demo_variants if args.demo_variants is not None else args.test_variant
     calibration_variants = args.calibration_variants if args.calibration_variants is not None else demo_variants
@@ -526,18 +468,6 @@ def main() -> None:
         str(args.patchcore_num_neighbors),
         "--patchcore-precision",
         args.patchcore_precision,
-        "--padim-backbone",
-        args.padim_backbone,
-        "--padim-layers",
-        *args.padim_layers,
-        "--padim-n-features",
-        str(args.padim_n_features),
-        "--fastflow-backbone",
-        args.fastflow_backbone,
-        "--fastflow-flow-steps",
-        str(args.fastflow_flow_steps),
-        "--fastflow-hidden-ratio",
-        str(args.fastflow_hidden_ratio),
         "--test-variant",
         *args.test_variant,
         "--accelerator",
@@ -549,8 +479,6 @@ def main() -> None:
     ]
     if args.tile_stride is not None:
         train_command.extend(["--tile-stride", str(args.tile_stride)])
-    if args.fastflow_conv3x3_only:
-        train_command.append("--fastflow-conv3x3-only")
     run(train_command, project_root)
 
     calibration_manifest = calibration_dir / "manifest.json"
@@ -639,18 +567,6 @@ def main() -> None:
         str(args.patchcore_num_neighbors),
         "--patchcore-precision",
         args.patchcore_precision,
-        "--padim-backbone",
-        args.padim_backbone,
-        "--padim-layers",
-        *args.padim_layers,
-        "--padim-n-features",
-        str(args.padim_n_features),
-        "--fastflow-backbone",
-        args.fastflow_backbone,
-        "--fastflow-flow-steps",
-        str(args.fastflow_flow_steps),
-        "--fastflow-hidden-ratio",
-        str(args.fastflow_hidden_ratio),
         "--roi-mode",
         args.roi_mode,
         "--fixed-roi",
@@ -682,8 +598,6 @@ def main() -> None:
     ]
     if args.tile_stride is not None:
         infer_command.extend(["--tile-stride", str(args.tile_stride)])
-    if args.fastflow_conv3x3_only:
-        infer_command.append("--fastflow-conv3x3-only")
     if use_calibration and calibration_manifest.exists():
         infer_command.extend(["--calibration-path", str(calibration_dir)])
     run(infer_command, project_root)
