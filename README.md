@@ -1,42 +1,26 @@
-# MVTec AD 2 `can` Demo Project
+# VisA Anomaly Detection Demo
 
-Project tối thiểu để bạn train và chạy demo anomaly detection trên **MVTec AD 2 / class `can`** bằng **Anomalib**.
+Project demo anomaly detection bằng Anomalib, mặc định dùng **VisA / `candle`**. Pipeline hiện hỗ trợ 2 model stage 1:
 
-Mục tiêu của bộ này là:
-- train nhanh một model anomaly detection trên `can`
-- test trên `test_public`
-- chạy inference trên ảnh hoặc thư mục ảnh
-- xuất **heatmap**, **overlay**, **CSV summary** và **HTML report** để demo
+- `patchcore`
+- `efficientad`
 
-> Lưu ý: bộ `can` chỉ là **proxy** để dựng demo anomaly detection trên vật thể hình trụ/kim loại. Nó **không đại diện trực tiếp** cho lỗi label thùng sơn thật.
+Bạn có thể chạy riêng lẻ từng model qua `train_demo.py`, `infer_demo.py`, `run_demo.py`, hoặc dùng hybrid segmentation qua `hybrid_demo.py`.
 
-## 1) Cấu trúc file
+## Dataset
+
+Mặc định các script tìm dataset ở:
 
 ```text
-mvtec_can_demo/
-├── README.md
-├── requirements.txt
-├── train_demo.py
-├── infer_demo.py
-├── prepare_demo_inputs.py
-└── run_demo.py
+./VisA/
+├── candle/
+│   └── Data/
+└── split_csv/
 ```
 
-## 2) Chuẩn bị môi trường
+Nếu VisA nằm chỗ khác, truyền `--dataset-root`. Category mặc định là `candle`, đổi bằng `--category`.
 
-### Python
-Khuyến nghị Python 3.10 - 3.12.
-
-### Cài thư viện
-Project này mặc định dùng NVIDIA GPU. Profile PatchCore mặc định ưu tiên chạy ổn trên GPU bộ nhớ vừa phải: `image-height 384`, `image-width 837`, `layer2 layer3`, `coreset 0.05`, `float16`, `score-aggregation model`, heatmap `global`, và `tiling off`. Nếu GPU còn dư VRAM, tăng dần lên `512x1116`, `coreset 0.1-0.15`, hoặc `float32`.
-
-Tạo môi trường ảo nếu chưa có:
-
-```bash
-python -m venv venv
-```
-
-Cài thư viện bằng Python trong `venv`:
+## Cài đặt
 
 ```powershell
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -48,153 +32,68 @@ Trên Linux/macOS:
 ./venv/bin/python -m pip install -r requirements.txt
 ```
 
-Nếu nâng driver NVIDIA mới hơn, bạn có thể đổi CUDA extra trong `requirements.txt` theo version Anomalib đang dùng, ví dụ `anomalib[cu126]` hoặc `anomalib[cu130]`.
+## Chạy nhanh
 
-## 3) Chuẩn bị dataset
-
-Giả sử bạn đã giải nén dataset ở:
-
-```text
-./can/
-└── can/
-    ├── train/
-    ├── validation/
-    ├── test_public/
-    ├── test_private/
-    └── test_private_mixed/
-```
-
-Project này mặc định dùng **`test_public`** để đánh giá local.
-
-Nếu dataset nằm ở chỗ khác, truyền `--dataset-root` khi chạy script.
-
-Thư mục `can/` trong project hiện là dataset local. Source code không bắt buộc phải có đúng thư mục này, nhưng train/demo cần một MVTec AD 2 dataset root có chứa category `can`.
-
-## 4) Train model
-
-### PatchCore (khuyến nghị chạy đầu tiên)
-
-```bash
-python train_demo.py \
-  --dataset-root ./can \
-  --category can \
-  --model patchcore \
-  --results-dir ./runs_patchcore \
-  --epochs 1 \
-  --image-height 384 \
-  --image-width 837 \
-  --tiling off \
-  --patchcore-layers layer2 layer3 \
-  --patchcore-coreset-ratio 0.05 \
-  --patchcore-precision float16 \
-  --train-batch-size 1 \
-  --eval-batch-size 1 \
-  --accelerator gpu \
-  --devices 1
-```
-
-### Chẩn đoán theo biến thể ảnh
-
-Trong bộ `can` này, `train/good` và `validation/good` chỉ có ảnh `regular`, nhưng `test_public/good` có thêm `overexposed`, `underexposed`, `shift_1`, `shift_2`, `shift_3`. Với one-class anomaly detection, các biến thể này có thể bị xem là anomaly dù nhãn là good.
-
-Để kiểm tra cùng điều kiện chụp trước:
+PatchCore:
 
 ```powershell
-.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_regular --epochs 1 --image-height 384 --image-width 837 --patchcore-layers layer2 layer3 --patchcore-coreset-ratio 0.05 --patchcore-precision float16 --tiling off --test-variant regular
+.\venv\Scripts\python.exe run_demo.py --model patchcore
 ```
 
-Để đo toàn bộ public split:
+EfficientAD:
 
 ```powershell
-.\venv\Scripts\python.exe train_demo.py --dataset-root .\can --category can --model patchcore --results-dir .\runs_patchcore_all --epochs 1 --image-height 384 --image-width 837 --patchcore-layers layer2 layer3 --patchcore-coreset-ratio 0.05 --patchcore-precision float16 --tiling off --test-variant all
+.\venv\Scripts\python.exe run_demo.py --model efficientad --max-steps 70000 --efficientad-imagenet-dir .\datasets\imagenette
 ```
 
-## 5) Chuẩn bị ảnh input demo
+`run_demo.py` sẽ train, chuẩn bị ảnh demo/calibration từ VisA, chạy inference và xuất report HTML.
 
-Bạn có thể lấy sẵn một ít ảnh từ `test_public` để demo:
+## Train riêng lẻ
 
-```bash
-python prepare_demo_inputs.py \
-  --dataset-root ./can \
-  --category can \
-  --output-dir ./demo_inputs \
-  --num-good 8 \
-  --num-bad 8
-```
-
-Nếu muốn demo cùng điều kiện chụp với train, thêm:
+PatchCore:
 
 ```powershell
---variants regular
+.\venv\Scripts\python.exe train_demo.py --dataset visa --dataset-root .\VisA --category candle --model patchcore --results-dir .\runs_patchcore_visa_candle --epochs 1
 ```
 
-## 6) Chạy inference và xuất report
-
-### Dùng checkpoint cụ thể
-
-```bash
-python infer_demo.py \
-  --input-path ./demo_inputs \
-  --checkpoint /path/to/model.ckpt \
-  --model patchcore \
-  --output-dir ./demo_outputs
-```
-
-### Hoặc tự tìm checkpoint tốt nhất trong thư mục results
-
-```bash
-python infer_demo.py \
-  --input-path ./demo_inputs \
-  --results-dir ./runs_patchcore \
-  --model patchcore \
-  --output-dir ./demo_outputs
-```
-
-Heatmap mặc định được chuẩn hóa `global` trên cả batch inference để tránh ảnh good bị tô đỏ chỉ vì từng ảnh được stretch riêng. Nếu muốn hành vi cũ, dùng `--heatmap-normalization per-image`.
-
-Kết quả sẽ có:
-- `predictions.csv`
-- `report.html`
-- `heatmaps/`
-- `overlays/`
-- `raw_maps/`
-
-## 7) Quy trình demo nhanh nhất
-
-Chạy toàn bộ pipeline bằng một lệnh chung cho Windows, Linux và macOS:
+EfficientAD:
 
 ```powershell
-.\venv\Scripts\python.exe run_demo.py --check-only
-.\venv\Scripts\python.exe run_demo.py
+.\venv\Scripts\python.exe train_demo.py --dataset visa --dataset-root .\VisA --category candle --model efficientad --results-dir .\runs_efficientad_visa_candle --max-steps 70000 --efficientad-imagenet-dir .\datasets\imagenette
 ```
 
-```bash
-./venv/bin/python run_demo.py --check-only
-./venv/bin/python run_demo.py
-```
+EfficientAD cần folder ImageNet/Imagenette-style cho penalty branch. Nếu máy có mạng, Anomalib có thể tự tải một số weights; nếu chạy offline, chuẩn bị sẵn `--efficientad-imagenet-dir`.
 
-Nếu dataset không nằm trong `./can`, chỉ rõ đường dẫn:
+## Inference riêng lẻ
 
 ```powershell
-.\venv\Scripts\python.exe run_demo.py --dataset-root /data/MVTec_AD_2
+.\venv\Scripts\python.exe infer_demo.py --model patchcore --dataset visa --dataset-root .\VisA --category candle --input-path .\demo_inputs_visa_candle --results-dir .\runs_patchcore_visa_candle
 ```
 
-## 8) Kết quả mong đợi
+Đổi `--model efficientad` và `--results-dir .\runs_efficientad_visa_candle` để dùng EfficientAD.
 
-Sau khi chạy xong bạn có thể mở:
+## Hybrid
 
-```text
-./demo_outputs/report.html
+Hybrid dùng anomaly map từ stage-1 model cộng với RGB để train U-Net segmentation.
+
+PatchCore hybrid:
+
+```powershell
+.\venv\Scripts\python.exe hybrid_demo.py --base-model patchcore --train-base-model
 ```
 
-để xem demo dạng trực quan: ảnh gốc, heatmap, overlay, score và nhãn dự đoán.
+EfficientAD hybrid:
 
-## 9) Khi chuyển sang dữ liệu thùng sơn thật
+```powershell
+.\venv\Scripts\python.exe hybrid_demo.py --base-model efficientad --train-base-model --efficientad-max-steps 70000 --efficientad-imagenet-dir .\datasets\imagenette
+```
 
-Bạn nên giữ lại logic project này và chỉ thay:
-- nguồn ảnh đầu vào
-- datamodule / folder dataset riêng
-- metric/threshold
-- phần sinh report
+Các tên cột cũ kiểu `patchcore_*` vẫn được giữ trong CSV/JSON để không phá file phân tích cũ, nhưng khi `--base-model efficientad` thì chúng đại diện cho score/map của EfficientAD.
 
-Tức là bộ file này có thể dùng như skeleton cho bước sau.
+## Output chính
+
+- `runs_<model>_visa_<category>/`: checkpoint và summary train
+- `demo_inputs_visa_<category>/`: ảnh demo được sample từ VisA
+- `calibration_inputs_visa_<category>/`: ảnh calibration
+- `demo_outputs_<model>_visa_<category>/`: `report.html`, `predictions.csv`, heatmap, overlay, raw maps
+- `hybrid_outputs_visa_<category>_<base-model>/`: checkpoint U-Net, CSV prediction, `summary.json`

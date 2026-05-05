@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Hybrid supervised anomaly segmentation on top of PatchCore maps.
+"""Hybrid supervised anomaly segmentation on top of base anomaly maps.
 
 Workflow:
 1. Split VisA into supervised train/val/test folders.
-2. Use infer_demo.py + PatchCore to export anomaly maps for each split.
+2. Use infer_demo.py + PatchCore/EfficientAD to export anomaly maps for each split.
 3. Train a small 4-channel U-Net on RGB + anomaly_map -> defect mask.
 
 The image-level good/bad decision is calibrated from validation predictions,
@@ -26,10 +26,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from train_demo import (
+    DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+    DEFAULT_EFFICIENTAD_LR,
+    DEFAULT_EFFICIENTAD_MAX_STEPS,
+    DEFAULT_EFFICIENTAD_MODEL_SIZE,
+    DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS,
+    DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
+    MODEL_CHOICES,
+)
+
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 DEFAULT_IMAGE_SIZE = (384, 384)
+BASE_MODEL_CHOICES = MODEL_CHOICES
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.10
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
@@ -40,17 +51,23 @@ LABELS = ("good", "bad")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a hybrid PatchCore + supervised U-Net segmentation workflow for VisA.",
+        description="Run a hybrid PatchCore/EfficientAD + supervised U-Net segmentation workflow for VisA.",
     )
     parser.add_argument("--dataset-root", type=Path, default=Path("./VisA"), help="Path to the VisA root folder.")
     parser.add_argument("--category", default="candle", help="VisA category, for example candle.")
+    parser.add_argument(
+        "--base-model",
+        choices=BASE_MODEL_CHOICES,
+        default="patchcore",
+        help="Stage-1 anomaly detector used to create maps for the hybrid U-Net.",
+    )
     parser.add_argument("--split-dir", type=Path, default=None, help="Prepared supervised split folder.")
-    parser.add_argument("--maps-dir", type=Path, default=None, help="PatchCore map output root for train/val/test.")
+    parser.add_argument("--maps-dir", type=Path, default=None, help="Base model map output root for train/val/test.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Hybrid model output directory.")
     parser.add_argument(
         "--patchcore-results-dir",
         type=Path,
-        default=Path("./runs_patchcore"),
+        default=None,
         help="Existing PatchCore training output directory searched by infer_demo.py.",
     )
     parser.add_argument(
@@ -60,9 +77,31 @@ def parse_args() -> argparse.Namespace:
         help="Direct PatchCore checkpoint path. Overrides --patchcore-results-dir during map generation.",
     )
     parser.add_argument(
+        "--efficientad-results-dir",
+        type=Path,
+        default=None,
+        help="Existing EfficientAD training output directory searched by infer_demo.py.",
+    )
+    parser.add_argument(
+        "--efficientad-checkpoint",
+        type=Path,
+        default=None,
+        help="Direct EfficientAD checkpoint path. Overrides --efficientad-results-dir during map generation.",
+    )
+    parser.add_argument(
+        "--train-base-model",
+        action="store_true",
+        help="Train the selected --base-model before generating hybrid maps.",
+    )
+    parser.add_argument(
         "--train-patchcore",
         action="store_true",
-        help="Train PatchCore stage 1 before generating hybrid maps.",
+        help="Train PatchCore stage 1 before generating hybrid maps. Same as --train-base-model when --base-model patchcore.",
+    )
+    parser.add_argument(
+        "--train-efficientad",
+        action="store_true",
+        help="Train EfficientAD stage 1 before generating hybrid maps. Same as --train-base-model when --base-model efficientad.",
     )
     parser.add_argument("--patchcore-epochs", type=int, default=1, help="PatchCore epochs when --train-patchcore is set.")
     parser.add_argument("--patchcore-train-batch-size", type=int, default=1, help="PatchCore train batch size.")
@@ -71,7 +110,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patchcore-coreset-ratio", type=float, default=DEFAULT_PATCHCORE_CORESET_RATIO)
     parser.add_argument("--patchcore-num-neighbors", type=int, default=DEFAULT_PATCHCORE_NUM_NEIGHBORS)
     parser.add_argument("--patchcore-precision", choices=["float16", "float32"], default=DEFAULT_PATCHCORE_PRECISION)
-    parser.add_argument("--image-size", type=int, default=None, help="Square image size for PatchCore maps and U-Net.")
+    parser.add_argument("--efficientad-max-steps", type=int, default=DEFAULT_EFFICIENTAD_MAX_STEPS)
+    parser.add_argument("--efficientad-train-batch-size", type=int, default=1)
+    parser.add_argument("--efficientad-eval-batch-size", type=int, default=1)
+    parser.add_argument("--efficientad-imagenet-dir", type=Path, default=DEFAULT_EFFICIENTAD_IMAGENET_DIR)
+    parser.add_argument("--efficientad-model-size", choices=["small", "medium"], default=DEFAULT_EFFICIENTAD_MODEL_SIZE)
+    parser.add_argument("--efficientad-teacher-out-channels", type=int, default=DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS)
+    parser.add_argument("--efficientad-lr", type=float, default=DEFAULT_EFFICIENTAD_LR)
+    parser.add_argument("--efficientad-weight-decay", type=float, default=DEFAULT_EFFICIENTAD_WEIGHT_DECAY)
+    parser.add_argument("--efficientad-padding", action="store_true")
+    parser.add_argument("--efficientad-no-pad-maps", action="store_true")
+    parser.add_argument("--image-size", type=int, default=None, help="Square image size for base maps and U-Net.")
     parser.add_argument("--image-height", type=int, default=None)
     parser.add_argument("--image-width", type=int, default=None)
     parser.add_argument("--train-good", type=int, default=800)
@@ -150,30 +199,36 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--image-decision-source",
-        choices=["patchcore", "unet"],
-        default="patchcore",
+        choices=["base", "patchcore", "unet"],
+        default="base",
         help=(
-            "Final good/bad decision source. patchcore keeps image-level gating in PatchCore and uses U-Net "
-            "for localization; unet keeps the previous mask-score behavior."
+            "Final good/bad decision source. base keeps image-level gating in the selected stage-1 model "
+            "and uses U-Net for localization; patchcore is kept as an alias for old commands."
         ),
+    )
+    parser.add_argument(
+        "--base-score-column",
+        choices=["model_pred_score", "pred_score"],
+        default=None,
+        help="Base model score column from generated predictions.csv used for image-level gating.",
     )
     parser.add_argument(
         "--patchcore-score-column",
         choices=["model_pred_score", "pred_score"],
         default="pred_score",
-        help="PatchCore score column from generated predictions.csv used for image-level gating.",
+        help="Backward-compatible alias for --base-score-column.",
     )
     parser.add_argument(
         "--patchcore-threshold-min-recall",
         type=float,
         default=0.90,
-        help="Minimum validation recall preferred when choosing the PatchCore image threshold.",
+        help="Minimum validation recall preferred when choosing the base-model image threshold.",
     )
     parser.add_argument(
         "--patchcore-threshold-min-specificity",
         type=float,
         default=0.92,
-        help="Minimum validation specificity preferred when choosing the PatchCore image threshold.",
+        help="Minimum validation specificity preferred when choosing the base-model image threshold.",
     )
     parser.add_argument(
         "--image-p99-weight",
@@ -197,27 +252,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--fallback-mask-source",
-        choices=["none", "patchcore_if_empty", "patchcore_if_small"],
+        choices=["none", "base_if_empty", "base_if_small", "patchcore_if_empty", "patchcore_if_small"],
         default="none",
-        help="Use PatchCore anomaly map as a localization fallback when the segmentation mask is empty/small.",
+        help="Use the base anomaly map as a localization fallback when the segmentation mask is empty/small.",
     )
     parser.add_argument(
         "--fallback-min-unet-area-fraction",
         type=float,
         default=0.001,
-        help="For patchcore_if_small, fallback when U-Net mask area fraction is at or below this value.",
+        help="For base_if_small/patchcore_if_small, fallback when U-Net mask area fraction is at or below this value.",
     )
     parser.add_argument(
         "--fallback-patchcore-percentile",
         type=float,
         default=99.7,
-        help="Percentile threshold on the normalized PatchCore anomaly map for fallback masks.",
+        help="Percentile threshold on the normalized base anomaly map for fallback masks.",
     )
     parser.add_argument(
         "--fallback-patchcore-min-value",
         type=float,
         default=0.0,
-        help="Minimum normalized PatchCore anomaly value required for fallback masks.",
+        help="Minimum normalized base anomaly value required for fallback masks.",
     )
     parser.add_argument(
         "--fallback-max-area-fraction",
@@ -250,7 +305,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--clean", action="store_true", help="Clean generated split/maps/output folders before running.")
     parser.add_argument("--skip-prepare", action="store_true", help="Reuse an existing --split-dir.")
-    parser.add_argument("--skip-map-generation", action="store_true", help="Reuse existing PatchCore maps in --maps-dir.")
+    parser.add_argument("--skip-map-generation", action="store_true", help="Reuse existing base-model maps in --maps-dir.")
     parser.add_argument("--skip-training", action="store_true", help="Stop after data preparation/map generation.")
     parser.add_argument("--no-augment", action="store_true", help="Disable simple flips during hybrid training.")
     parser.add_argument("--no-amp", action="store_true", help="Disable CUDA automatic mixed precision for U-Net training.")
@@ -283,6 +338,34 @@ def format_command(command: list[str]) -> str:
 def run_command(command: list[str], project_root: Path) -> None:
     print(f"\n[RUN] {format_command(command)}", flush=True)
     subprocess.run(command, cwd=project_root, check=True)
+
+
+def normalize_image_decision_source(source: str) -> str:
+    return "base" if source == "patchcore" else source
+
+
+def normalize_fallback_mask_source(source: str) -> str:
+    if source == "patchcore_if_empty":
+        return "base_if_empty"
+    if source == "patchcore_if_small":
+        return "base_if_small"
+    return source
+
+
+def use_base_image_decision(source: str) -> bool:
+    return normalize_image_decision_source(source) == "base"
+
+
+def selected_base_score_column(args: argparse.Namespace) -> str:
+    return args.base_score_column or args.patchcore_score_column
+
+
+def should_train_base_model(args: argparse.Namespace) -> bool:
+    return (
+        args.train_base_model
+        or (args.base_model == "patchcore" and args.train_patchcore)
+        or (args.base_model == "efficientad" and args.train_efficientad)
+    )
 
 
 def list_images(folder: Path) -> list[Path]:
@@ -455,9 +538,9 @@ def prepare_hybrid_split(args: argparse.Namespace, split_dir: Path) -> dict[str,
     return manifest
 
 
-def train_patchcore_stage(args: argparse.Namespace, project_root: Path, image_size: tuple[int, int], patchcore_results_dir: Path) -> None:
-    if args.clean and patchcore_results_dir.exists():
-        shutil.rmtree(patchcore_results_dir)
+def train_base_stage(args: argparse.Namespace, project_root: Path, image_size: tuple[int, int], results_dir: Path) -> None:
+    if args.clean and results_dir.exists():
+        shutil.rmtree(results_dir)
     command = [
         sys.executable,
         "train_demo.py",
@@ -468,31 +551,15 @@ def train_patchcore_stage(args: argparse.Namespace, project_root: Path, image_si
         "--category",
         args.category,
         "--model",
-        "patchcore",
+        args.base_model,
         "--results-dir",
-        str(patchcore_results_dir),
-        "--epochs",
-        str(args.patchcore_epochs),
-        "--train-batch-size",
-        str(args.patchcore_train_batch_size),
-        "--eval-batch-size",
-        str(args.patchcore_eval_batch_size),
+        str(results_dir),
         "--image-height",
         str(image_size[0]),
         "--image-width",
         str(image_size[1]),
         "--num-workers",
         str(args.num_workers),
-        "--tiling",
-        "off",
-        "--patchcore-layers",
-        *args.patchcore_layers,
-        "--patchcore-coreset-ratio",
-        str(args.patchcore_coreset_ratio),
-        "--patchcore-num-neighbors",
-        str(args.patchcore_num_neighbors),
-        "--patchcore-precision",
-        args.patchcore_precision,
         "--accelerator",
         args.accelerator,
         "--devices",
@@ -500,16 +567,64 @@ def train_patchcore_stage(args: argparse.Namespace, project_root: Path, image_si
         "--seed",
         str(args.seed),
     ]
+    if args.base_model == "patchcore":
+        command.extend(
+            [
+                "--epochs",
+                str(args.patchcore_epochs),
+                "--train-batch-size",
+                str(args.patchcore_train_batch_size),
+                "--eval-batch-size",
+                str(args.patchcore_eval_batch_size),
+                "--tiling",
+                "off",
+                "--patchcore-layers",
+                *args.patchcore_layers,
+                "--patchcore-coreset-ratio",
+                str(args.patchcore_coreset_ratio),
+                "--patchcore-num-neighbors",
+                str(args.patchcore_num_neighbors),
+                "--patchcore-precision",
+                args.patchcore_precision,
+            ],
+        )
+    else:
+        command.extend(
+            [
+                "--epochs",
+                "1",
+                "--train-batch-size",
+                str(args.efficientad_train_batch_size),
+                "--eval-batch-size",
+                str(args.efficientad_eval_batch_size),
+                "--max-steps",
+                str(args.efficientad_max_steps),
+                "--efficientad-imagenet-dir",
+                str(args.efficientad_imagenet_dir),
+                "--efficientad-model-size",
+                args.efficientad_model_size,
+                "--efficientad-teacher-out-channels",
+                str(args.efficientad_teacher_out_channels),
+                "--efficientad-lr",
+                str(args.efficientad_lr),
+                "--efficientad-weight-decay",
+                str(args.efficientad_weight_decay),
+            ],
+        )
+        if args.efficientad_padding:
+            command.append("--efficientad-padding")
+        if args.efficientad_no_pad_maps:
+            command.append("--efficientad-no-pad-maps")
     run_command(command, project_root)
 
 
-def generate_patchcore_maps(
+def generate_base_maps(
     args: argparse.Namespace,
     project_root: Path,
     image_size: tuple[int, int],
     split_dir: Path,
     maps_dir: Path,
-    patchcore_results_dir: Path,
+    results_dir: Path,
 ) -> None:
     if args.clean and maps_dir.exists():
         shutil.rmtree(maps_dir)
@@ -525,7 +640,7 @@ def generate_patchcore_maps(
             "--input-path",
             str(split_dir / split),
             "--model",
-            "patchcore",
+            args.base_model,
             "--dataset-root",
             str(args.dataset_root),
             "--category",
@@ -536,31 +651,61 @@ def generate_patchcore_maps(
             str(image_size[0]),
             "--image-width",
             str(image_size[1]),
-            "--tiling",
-            "off",
-            "--patchcore-layers",
-            *args.patchcore_layers,
-            "--patchcore-coreset-ratio",
-            str(args.patchcore_coreset_ratio),
-            "--patchcore-num-neighbors",
-            str(args.patchcore_num_neighbors),
-            "--patchcore-precision",
-            args.patchcore_precision,
-            "--roi-mode",
-            "foreground",
-            "--score-aggregation",
-            "pixel-percentile",
-            "--score-percentile",
-            "99",
             "--accelerator",
             args.accelerator,
             "--devices",
             args.devices,
         ]
-        if args.patchcore_checkpoint is not None:
-            command.extend(["--checkpoint", str(args.patchcore_checkpoint)])
+        if args.base_model == "patchcore":
+            command.extend(
+                [
+                    "--tiling",
+                    "off",
+                    "--patchcore-layers",
+                    *args.patchcore_layers,
+                    "--patchcore-coreset-ratio",
+                    str(args.patchcore_coreset_ratio),
+                    "--patchcore-num-neighbors",
+                    str(args.patchcore_num_neighbors),
+                    "--patchcore-precision",
+                    args.patchcore_precision,
+                    "--roi-mode",
+                    "foreground",
+                    "--score-aggregation",
+                    "pixel-percentile",
+                    "--score-percentile",
+                    "99",
+                ],
+            )
+            checkpoint = args.patchcore_checkpoint
         else:
-            command.extend(["--results-dir", str(patchcore_results_dir)])
+            command.extend(
+                [
+                    "--efficientad-imagenet-dir",
+                    str(args.efficientad_imagenet_dir),
+                    "--efficientad-model-size",
+                    args.efficientad_model_size,
+                    "--efficientad-teacher-out-channels",
+                    str(args.efficientad_teacher_out_channels),
+                    "--efficientad-lr",
+                    str(args.efficientad_lr),
+                    "--efficientad-weight-decay",
+                    str(args.efficientad_weight_decay),
+                    "--roi-mode",
+                    "off",
+                    "--score-aggregation",
+                    "model",
+                ],
+            )
+            if args.efficientad_padding:
+                command.append("--efficientad-padding")
+            if args.efficientad_no_pad_maps:
+                command.append("--efficientad-no-pad-maps")
+            checkpoint = args.efficientad_checkpoint
+        if checkpoint is not None:
+            command.extend(["--checkpoint", str(checkpoint)])
+        else:
+            command.extend(["--results-dir", str(results_dir)])
         run_command(command, project_root)
 
 
@@ -579,7 +724,7 @@ class HybridSample:
 def load_hybrid_samples(output_dir: Path, split: str) -> list[HybridSample]:
     csv_path = output_dir / "predictions.csv"
     if not csv_path.exists():
-        raise SystemExit(f"PatchCore predictions.csv not found for {split}: {csv_path}")
+        raise SystemExit(f"Base-model predictions.csv not found for {split}: {csv_path}")
 
     samples: list[HybridSample] = []
     with csv_path.open(newline="", encoding="utf-8") as f:
@@ -595,7 +740,7 @@ def load_hybrid_samples(output_dir: Path, split: str) -> list[HybridSample]:
             map_path = output_dir / map_rel
             mask_path = output_dir / mask_rel
             if not image_path.exists() or not map_path.exists() or not mask_path.exists():
-                raise SystemExit(f"Incomplete PatchCore map row in {csv_path}: {row}")
+                raise SystemExit(f"Incomplete base-model map row in {csv_path}: {row}")
             samples.append(
                 HybridSample(
                     split=split,
@@ -1136,9 +1281,9 @@ def should_use_patchcore_fallback(
         return False
     if int(pred_label) != 1:
         return False
-    if fallback_mask_source == "patchcore_if_empty":
+    if fallback_mask_source in {"base_if_empty", "patchcore_if_empty"}:
         return int(unet_post["component_count"]) == 0
-    if fallback_mask_source == "patchcore_if_small":
+    if fallback_mask_source in {"base_if_small", "patchcore_if_small"}:
         return float(unet_post["area_fraction"]) <= fallback_min_unet_area_fraction
     return False
 
@@ -1360,6 +1505,8 @@ def evaluate_model(
     import torch
     from PIL import Image
 
+    image_decision_source = normalize_image_decision_source(image_decision_source)
+    fallback_mask_source = normalize_fallback_mask_source(fallback_mask_source)
     model.eval()
     labels: list[int] = []
     unet_scores: list[float] = []
@@ -1413,7 +1560,7 @@ def evaluate_model(
                 )
                 patchcore_score = float(batch_patchcore_scores[idx])
                 label = int(batch_labels[idx])
-                if image_decision_source == "patchcore":
+                if use_base_image_decision(image_decision_source):
                     final_score = patchcore_score
                     final_threshold = patchcore_image_threshold
                 else:
@@ -1449,7 +1596,7 @@ def evaluate_model(
                     fallback_skipped_by_area_cap = bool(fallback_post["fallback_skipped_by_area_cap"])
                     if fallback_candidate_component_count > 0 and not fallback_skipped_by_area_cap:
                         post = fallback_post
-                        mask_source = "patchcore_fallback"
+                        mask_source = "base_fallback"
                         fallback_used = True
                         fallback_used_count += 1
 
@@ -1501,8 +1648,10 @@ def evaluate_model(
                         "image_score": final_score,
                         "final_image_score": final_score,
                         "unet_image_score": unet_score,
+                        "base_image_score": patchcore_score,
                         "patchcore_image_score": patchcore_score,
                         "image_decision_source": image_decision_source,
+                        "base_score_column": patchcore_score_column,
                         "patchcore_score_column": patchcore_score_column,
                         "mask_source": mask_source,
                         "fallback_used": fallback_used,
@@ -1513,6 +1662,7 @@ def evaluate_model(
                         "mask_threshold": mask_threshold,
                         "image_threshold": "" if final_threshold is None else final_threshold,
                         "unet_image_threshold": "" if image_threshold is None else image_threshold,
+                        "base_image_threshold": "" if patchcore_image_threshold is None else patchcore_image_threshold,
                         "patchcore_image_threshold": "" if patchcore_image_threshold is None else patchcore_image_threshold,
                         "unet_raw_area_fraction": unet_post["raw_area_fraction"],
                         "unet_pred_area_fraction": unet_area_fraction,
@@ -1546,14 +1696,16 @@ def evaluate_model(
         if labels
         else {}
     )
-    image_report = patchcore_image_report if image_decision_source == "patchcore" else unet_image_report
+    image_report = patchcore_image_report if use_base_image_decision(image_decision_source) else unet_image_report
     report = {
         "num_samples": len(labels),
         "mask_threshold": mask_threshold,
-        "image_threshold": patchcore_image_threshold if image_decision_source == "patchcore" else image_threshold,
+        "image_threshold": patchcore_image_threshold if use_base_image_decision(image_decision_source) else image_threshold,
         "unet_image_threshold": image_threshold,
+        "base_image_threshold": patchcore_image_threshold,
         "patchcore_image_threshold": patchcore_image_threshold,
         "image_decision_source": image_decision_source,
+        "base_score_column": patchcore_score_column,
         "patchcore_score_column": patchcore_score_column,
         "patchcore_threshold_min_recall": patchcore_threshold_min_recall,
         "patchcore_threshold_min_specificity": patchcore_threshold_min_specificity,
@@ -1583,6 +1735,7 @@ def evaluate_model(
         "fallback_used_count": fallback_used_count,
         "image": image_report,
         "unet_image": unet_image_report,
+        "base_image": patchcore_image_report,
         "patchcore_image": patchcore_image_report,
     }
     return report, rows
@@ -1675,8 +1828,8 @@ def load_torch_checkpoint(path: Path, device: Any) -> dict[str, Any]:
 
 def evaluate_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "image_decision_source": args.image_decision_source,
-        "patchcore_score_column": args.patchcore_score_column,
+        "image_decision_source": normalize_image_decision_source(args.image_decision_source),
+        "patchcore_score_column": selected_base_score_column(args),
         "patchcore_threshold_min_recall": args.patchcore_threshold_min_recall,
         "patchcore_threshold_min_specificity": args.patchcore_threshold_min_specificity,
         "image_score_mode": args.image_score_mode,
@@ -1685,7 +1838,7 @@ def evaluate_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "image_blob_weight": args.image_blob_weight,
         "postprocess_min_component_area": args.postprocess_min_component_area,
         "postprocess_object_edge_ignore_px": args.postprocess_object_edge_ignore_px,
-        "fallback_mask_source": args.fallback_mask_source,
+        "fallback_mask_source": normalize_fallback_mask_source(args.fallback_mask_source),
         "fallback_min_unet_area_fraction": args.fallback_min_unet_area_fraction,
         "fallback_patchcore_percentile": args.fallback_patchcore_percentile,
         "fallback_patchcore_min_value": args.fallback_patchcore_min_value,
@@ -1718,6 +1871,11 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     import numpy as np
     import torch
     from torch import nn
+
+    base_model_name = getattr(args, "base_model", "patchcore")
+    decision_source = normalize_image_decision_source(args.image_decision_source)
+    base_score_column = selected_base_score_column(args)
+    fallback_mask_source = normalize_fallback_mask_source(args.fallback_mask_source)
 
     if args.clean and output_dir.exists() and not args.eval_only:
         shutil.rmtree(output_dir)
@@ -1842,10 +2000,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         )
         print(f"[INFO] Checkpoint by: {args.checkpoint_selection}")
         print(f"[INFO] Mask thr by  : {args.mask_threshold_selection}")
-    if args.fallback_mask_source != "none":
+    if fallback_mask_source != "none":
         print(
             "[INFO] Mask fallback: "
-            f"{args.fallback_mask_source}, p{args.fallback_patchcore_percentile:.2f}, "
+            f"{fallback_mask_source}, p{args.fallback_patchcore_percentile:.2f}, "
             f"min_unet_area={args.fallback_min_unet_area_fraction:.6f}",
         )
     print("=" * 80)
@@ -1952,7 +2110,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     )
     unet_image_threshold = float(val_report_for_threshold["unet_image"]["threshold"])
     patchcore_image_threshold = float(val_report_for_threshold["patchcore_image"]["threshold"])
-    final_image_threshold = patchcore_image_threshold if args.image_decision_source == "patchcore" else unet_image_threshold
+    final_image_threshold = patchcore_image_threshold if use_base_image_decision(decision_source) else unet_image_threshold
 
     train_report, train_rows = evaluate_model(
         model,
@@ -1993,7 +2151,8 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         "category": args.category,
         "image_size": f"{image_size[0]}x{image_size[1]}",
         "map_range": {"low": map_range[0], "high": map_range[1]},
-        "model": "hybrid_patchcore_segmentation",
+        "model": f"hybrid_{base_model_name}_segmentation",
+        "base_model": base_model_name,
         "segmentation_model": {
             "arch": seg_arch,
             "encoder": seg_encoder if seg_arch != "small_unet" else None,
@@ -2007,9 +2166,16 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
         "mask_threshold_selection": args.mask_threshold_selection,
         "image_threshold": final_image_threshold,
         "unet_image_threshold": unet_image_threshold,
+        "base_image_threshold": patchcore_image_threshold,
         "patchcore_image_threshold": patchcore_image_threshold,
-        "image_decision_source": args.image_decision_source,
-        "patchcore_score_column": args.patchcore_score_column,
+        "image_decision_source": decision_source,
+        "base_score_column": base_score_column,
+        "patchcore_score_column": base_score_column,
+        "base_threshold_policy": {
+            "min_recall": args.patchcore_threshold_min_recall,
+            "min_specificity": args.patchcore_threshold_min_specificity,
+            "selection": val_report_for_threshold["patchcore_image"].get("threshold_selection"),
+        },
         "patchcore_threshold_policy": {
             "min_recall": args.patchcore_threshold_min_recall,
             "min_specificity": args.patchcore_threshold_min_specificity,
@@ -2037,7 +2203,7 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             "image_blob_weight": args.image_blob_weight,
             "min_component_area_384": args.postprocess_min_component_area,
             "object_edge_ignore_px": args.postprocess_object_edge_ignore_px,
-            "fallback_mask_source": args.fallback_mask_source,
+            "fallback_mask_source": fallback_mask_source,
             "fallback_min_unet_area_fraction": args.fallback_min_unet_area_fraction,
             "fallback_patchcore_percentile": args.fallback_patchcore_percentile,
             "fallback_patchcore_min_value": args.fallback_patchcore_min_value,
@@ -2056,12 +2222,13 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     print("[INFO] Hybrid evaluation done" if args.eval_only else "[INFO] Hybrid training done")
     print(f"[INFO] Best checkpoint : {best_path}")
     print(f"[INFO] Mask threshold  : {best_mask_threshold:.3f}")
-    print(f"[INFO] Decision source : {args.image_decision_source} ({args.patchcore_score_column})")
+    print(f"[INFO] Base model      : {base_model_name}")
+    print(f"[INFO] Decision source : {decision_source} ({base_score_column})")
     print(f"[INFO] Image threshold : {final_image_threshold:.6f}")
     print(f"[INFO] U-Net threshold : {unet_image_threshold:.6f}")
-    print(f"[INFO] PatchCore thr   : {patchcore_image_threshold:.6f}")
+    print(f"[INFO] Base-model thr : {patchcore_image_threshold:.6f}")
     print(
-        "[INFO] PatchCore policy: "
+        "[INFO] Base policy   : "
         f"recall>={args.patchcore_threshold_min_recall:.3f}, "
         f"specificity>={args.patchcore_threshold_min_specificity:.3f}, "
         f"selection={val_report_for_threshold['patchcore_image'].get('threshold_selection')}",
@@ -2080,15 +2247,29 @@ def main() -> None:
     args = parse_args()
     project_root = Path(__file__).resolve().parent
     args.dataset_root = project_path(args.dataset_root, project_root)
+    args.image_decision_source = normalize_image_decision_source(args.image_decision_source)
+    args.fallback_mask_source = normalize_fallback_mask_source(args.fallback_mask_source)
+    args.patchcore_score_column = selected_base_score_column(args)
+    args.base_score_column = args.patchcore_score_column
     image_size = resolve_image_size(args)
     split_dir = project_path(args.split_dir or Path(f"./hybrid_inputs_visa_{args.category}"), project_root)
-    maps_dir = project_path(args.maps_dir or Path(f"./hybrid_maps_visa_{args.category}_patchcore"), project_root)
-    output_dir = project_path(args.output_dir or Path(f"./hybrid_outputs_visa_{args.category}"), project_root)
-    patchcore_results_dir = project_path(args.patchcore_results_dir, project_root)
+    maps_dir = project_path(args.maps_dir or Path(f"./hybrid_maps_visa_{args.category}_{args.base_model}"), project_root)
+    output_dir = project_path(args.output_dir or Path(f"./hybrid_outputs_visa_{args.category}_{args.base_model}"), project_root)
+    patchcore_results_dir = project_path(args.patchcore_results_dir or Path(f"./runs_patchcore_visa_{args.category}"), project_root)
+    efficientad_results_dir = project_path(args.efficientad_results_dir or Path(f"./runs_efficientad_visa_{args.category}"), project_root)
+    base_results_dir = patchcore_results_dir if args.base_model == "patchcore" else efficientad_results_dir
     if args.patchcore_checkpoint is not None:
         args.patchcore_checkpoint = project_path(args.patchcore_checkpoint, project_root)
+    if args.efficientad_checkpoint is not None:
+        args.efficientad_checkpoint = project_path(args.efficientad_checkpoint, project_root)
+    args.efficientad_imagenet_dir = project_path(args.efficientad_imagenet_dir, project_root)
     if args.hybrid_checkpoint is not None:
         args.hybrid_checkpoint = project_path(args.hybrid_checkpoint, project_root)
+
+    if args.train_patchcore and args.base_model != "patchcore":
+        raise SystemExit("--train-patchcore requires --base-model patchcore. Use --train-base-model for the selected base model.")
+    if args.train_efficientad and args.base_model != "efficientad":
+        raise SystemExit("--train-efficientad requires --base-model efficientad. Use --train-base-model for the selected base model.")
 
     if args.train_bad <= 0 or args.val_bad <= 0 or args.test_bad <= 0:
         raise SystemExit("Hybrid supervised training needs bad samples in train/val/test.")
@@ -2120,6 +2301,28 @@ def main() -> None:
         raise SystemExit("--focal-gamma must be non-negative.")
     if args.tversky_alpha < 0.0 or args.tversky_beta < 0.0:
         raise SystemExit("--tversky-alpha and --tversky-beta must be non-negative.")
+    if args.base_model == "patchcore":
+        if not args.patchcore_layers:
+            raise SystemExit("--patchcore-layers must include at least one layer.")
+        if not (0.0 < args.patchcore_coreset_ratio <= 1.0):
+            raise SystemExit("--patchcore-coreset-ratio must be in the range (0, 1].")
+        if args.patchcore_num_neighbors <= 0:
+            raise SystemExit("--patchcore-num-neighbors must be a positive integer.")
+        if args.patchcore_train_batch_size <= 0 or args.patchcore_eval_batch_size <= 0:
+            raise SystemExit("PatchCore batch sizes must be positive.")
+    else:
+        if args.efficientad_max_steps <= 0:
+            raise SystemExit("--efficientad-max-steps must be a positive integer.")
+        if args.efficientad_train_batch_size != 1:
+            raise SystemExit("EfficientAD requires --efficientad-train-batch-size 1.")
+        if args.efficientad_eval_batch_size <= 0:
+            raise SystemExit("--efficientad-eval-batch-size must be positive.")
+        if args.efficientad_teacher_out_channels <= 0:
+            raise SystemExit("--efficientad-teacher-out-channels must be a positive integer.")
+        if args.efficientad_lr <= 0.0:
+            raise SystemExit("--efficientad-lr must be positive.")
+        if args.efficientad_weight_decay < 0.0:
+            raise SystemExit("--efficientad-weight-decay must be non-negative.")
     if not 0.0 <= args.patchcore_threshold_min_recall <= 1.0:
         raise SystemExit("--patchcore-threshold-min-recall must be between 0 and 1.")
     if not 0.0 <= args.patchcore_threshold_min_specificity <= 1.0:
@@ -2147,10 +2350,10 @@ def main() -> None:
 
     if not args.skip_prepare:
         prepare_hybrid_split(args, split_dir)
-    if args.train_patchcore:
-        train_patchcore_stage(args, project_root, image_size, patchcore_results_dir)
+    if should_train_base_model(args):
+        train_base_stage(args, project_root, image_size, base_results_dir)
     if not args.skip_map_generation:
-        generate_patchcore_maps(args, project_root, image_size, split_dir, maps_dir, patchcore_results_dir)
+        generate_base_maps(args, project_root, image_size, split_dir, maps_dir, base_results_dir)
     if not args.skip_training:
         train_hybrid_model(args, image_size, maps_dir, output_dir)
 

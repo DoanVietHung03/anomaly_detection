@@ -15,11 +15,18 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from train_demo import (
     DATASET_CHOICES,
+    DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+    DEFAULT_EFFICIENTAD_LR,
+    DEFAULT_EFFICIENTAD_MAX_STEPS,
+    DEFAULT_EFFICIENTAD_MODEL_SIZE,
+    DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS,
+    DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
     DEFAULT_PATCHCORE_CORESET_RATIO,
     DEFAULT_PATCHCORE_LAYERS,
     DEFAULT_PATCHCORE_NUM_NEIGHBORS,
     DEFAULT_PATCHCORE_PRECISION,
     DEFAULT_TILING,
+    MODEL_CHOICES,
     VARIANT_CHOICES,
     resolve_image_size,
 )
@@ -54,33 +61,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         choices=DATASET_CHOICES,
-        default="mvtec_ad2",
+        default="visa",
         help="Dataset format. Use visa for the VisA dataset.",
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path("./can"),
-        help="Path to the MVTec AD 2 root. Defaults to ./can for this project layout.",
+        default=Path("./VisA"),
+        help="Path to the VisA or MVTec AD 2 root. Defaults to ./VisA for this project layout.",
     )
-    parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category.")
+    parser.add_argument("--category", type=str, default="candle", help="Dataset category.")
     parser.add_argument(
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore"],
-        help="Model architecture to train and run. Only PatchCore is supported.",
+        choices=MODEL_CHOICES,
+        help="Model architecture to train and run.",
     )
     parser.add_argument("--results-dir", type=Path, default=None, help="Training output directory.")
-    parser.add_argument("--input-dir", type=Path, default=Path("./demo_inputs"), help="Prepared demo input directory.")
+    parser.add_argument("--input-dir", type=Path, default=None, help="Prepared demo input directory.")
     parser.add_argument(
         "--calibration-dir",
         type=Path,
-        default=Path("./calibration_inputs"),
+        default=None,
         help="Prepared calibration input directory used for threshold selection.",
     )
     parser.add_argument("--output-dir", type=Path, default=None, help="Inference output directory.")
     parser.add_argument("--epochs", type=int, default=None, help="Training epochs. Defaults to 1.")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Optional Lightning max_steps. Defaults to 70000 for EfficientAD and unset for PatchCore.",
+    )
     parser.add_argument("--num-good", type=int, default=8, help="Number of good demo images to sample.")
     parser.add_argument("--num-bad", type=int, default=8, help="Number of anomalous demo images to sample.")
     parser.add_argument("--num-calibration-good", type=int, default=30, help="Number of good calibration images to sample.")
@@ -95,12 +108,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional square training/inference image size. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="Training/inference image height. Defaults to 384.")
-    parser.add_argument("--image-width", type=int, default=None, help="Training/inference image width. Defaults to 837.")
+    parser.add_argument("--image-width", type=int, default=None, help="Training/inference image width. Defaults to 384.")
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
         default=DEFAULT_TILING,
-        help="Enable tiled PatchCore processing. off is the memory-safe default for wide can images.",
+        help="Enable tiled PatchCore processing. off is the default and EfficientAD does not use tiling.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument("--tile-stride", type=int, default=None, help="PatchCore tile stride. Defaults to half tile size.")
@@ -128,6 +141,37 @@ def parse_args() -> argparse.Namespace:
         choices=["float16", "float32"],
         default=DEFAULT_PATCHCORE_PRECISION,
         help="PatchCore compute precision. float16 is the memory-safe default; use float32 only if memory allows.",
+    )
+    parser.add_argument(
+        "--efficientad-imagenet-dir",
+        type=Path,
+        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+        help="ImageNet/Imagenette-style folder used by EfficientAD's penalty branch.",
+    )
+    parser.add_argument(
+        "--efficientad-model-size",
+        choices=["small", "medium"],
+        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
+        help="EfficientAD student/teacher size.",
+    )
+    parser.add_argument(
+        "--efficientad-teacher-out-channels",
+        type=int,
+        default=DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS,
+        help="EfficientAD teacher output channels.",
+    )
+    parser.add_argument("--efficientad-lr", type=float, default=DEFAULT_EFFICIENTAD_LR, help="EfficientAD learning rate.")
+    parser.add_argument(
+        "--efficientad-weight-decay",
+        type=float,
+        default=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
+        help="EfficientAD optimizer weight decay.",
+    )
+    parser.add_argument("--efficientad-padding", action="store_true", help="Enable padding in EfficientAD convolutions.")
+    parser.add_argument(
+        "--efficientad-no-pad-maps",
+        action="store_true",
+        help="Do not pad EfficientAD anomaly maps when convolution padding is disabled.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for training and sampling.")
     parser.add_argument(
@@ -171,7 +215,7 @@ def parse_args() -> argparse.Namespace:
         "--roi-mode",
         choices=ROI_MODE_CHOICES,
         default=None,
-        help="Restrict inference score aggregation. Defaults to fixed-foreground for PatchCore.",
+        help="Restrict inference score aggregation. Defaults to fixed-foreground for PatchCore and off for EfficientAD.",
     )
     parser.add_argument(
         "--fixed-roi",
@@ -179,13 +223,13 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=list(DEFAULT_FIXED_ROI),
         metavar=("X1", "Y1", "X2", "Y2"),
-        help="Fixed ROI as normalized fractions of width/height. Default keeps the can body and skips borders/glare edges.",
+        help="Fixed ROI as normalized fractions of width/height.",
     )
     parser.add_argument(
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
         default=None,
-        help="Image score aggregation used by infer_demo.py. Defaults to pixel-mean for PatchCore.",
+        help="Image score aggregation used by infer_demo.py. Defaults to pixel-mean for PatchCore and model for EfficientAD.",
     )
     parser.add_argument(
         "--calibration-objective",
@@ -242,19 +286,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def default_epochs() -> int:
+def default_epochs(model: str) -> int:
     return 1
 
 
-def default_score_aggregation() -> str:
-    return "pixel-mean"
+def default_max_steps(model: str) -> int | None:
+    return DEFAULT_EFFICIENTAD_MAX_STEPS if model == "efficientad" else None
 
 
-def default_roi_mode() -> str:
-    return "fixed-foreground"
+def default_score_aggregation(model: str) -> str:
+    return "model" if model == "efficientad" else "pixel-mean"
 
 
-def default_train_batch_size() -> int:
+def default_roi_mode(model: str) -> str:
+    return "off" if model == "efficientad" else "fixed-foreground"
+
+
+def default_train_batch_size(model: str) -> int:
     return 1
 
 
@@ -405,21 +453,37 @@ def main() -> None:
     project_root = Path(__file__).resolve().parent
 
     dataset_root = project_path(args.dataset_root, project_root)
-    results_dir = project_path(args.results_dir or Path(f"./runs_{args.model}"), project_root)
-    input_dir = project_path(args.input_dir, project_root)
-    calibration_dir = project_path(args.calibration_dir, project_root)
-    output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}"), project_root)
+    dataset_tag = f"{args.dataset}_{args.category}"
+    results_dir = project_path(args.results_dir or Path(f"./runs_{args.model}_{dataset_tag}"), project_root)
+    input_dir = project_path(args.input_dir or Path(f"./demo_inputs_{dataset_tag}"), project_root)
+    calibration_dir = project_path(args.calibration_dir or Path(f"./calibration_inputs_{dataset_tag}"), project_root)
+    output_dir = project_path(args.output_dir or Path(f"./demo_outputs_{args.model}_{dataset_tag}"), project_root)
+    efficientad_imagenet_dir = project_path(args.efficientad_imagenet_dir, project_root)
     image_size = resolve_image_size(args)
-    args.roi_mode = args.roi_mode or default_roi_mode()
+    args.roi_mode = args.roi_mode or default_roi_mode(args.model)
     fixed_roi = validate_fixed_roi(args.fixed_roi)
     if args.score_blob_min_area <= 0:
         raise SystemExit("--score-blob-min-area must be a positive integer.")
     if args.score_blob_area_weight < 0.0:
         raise SystemExit("--score-blob-area-weight must be non-negative.")
-    epochs = args.epochs if args.epochs is not None else default_epochs()
-    score_aggregation = args.score_aggregation or default_score_aggregation()
-    default_batch_size = default_train_batch_size()
+    if args.max_steps is not None and args.max_steps <= 0:
+        raise SystemExit("--max-steps must be a positive integer.")
+    if args.efficientad_teacher_out_channels <= 0:
+        raise SystemExit("--efficientad-teacher-out-channels must be a positive integer.")
+    if args.efficientad_lr <= 0.0:
+        raise SystemExit("--efficientad-lr must be positive.")
+    if args.efficientad_weight_decay < 0.0:
+        raise SystemExit("--efficientad-weight-decay must be non-negative.")
+    if args.model != "patchcore" and (args.tiling != "off" or args.tile_stride is not None):
+        raise SystemExit("--tiling and --tile-stride are only supported for PatchCore.")
+
+    epochs = args.epochs if args.epochs is not None else default_epochs(args.model)
+    max_steps = args.max_steps if args.max_steps is not None else default_max_steps(args.model)
+    score_aggregation = args.score_aggregation or default_score_aggregation(args.model)
+    default_batch_size = default_train_batch_size(args.model)
     train_batch_size = args.train_batch_size if args.train_batch_size is not None else default_batch_size
+    if args.model == "efficientad" and train_batch_size != 1:
+        raise SystemExit("EfficientAD requires --train-batch-size 1.")
     demo_variants = args.demo_variants if args.demo_variants is not None else args.test_variant
     calibration_variants = args.calibration_variants if args.calibration_variants is not None else demo_variants
 
@@ -456,28 +520,58 @@ def main() -> None:
         str(image_size[1]),
         "--num-workers",
         str(args.num_workers),
-        "--tiling",
-        args.tiling,
-        "--tile-size",
-        str(args.tile_size),
-        "--patchcore-layers",
-        *args.patchcore_layers,
-        "--patchcore-coreset-ratio",
-        str(args.patchcore_coreset_ratio),
-        "--patchcore-num-neighbors",
-        str(args.patchcore_num_neighbors),
-        "--patchcore-precision",
-        args.patchcore_precision,
-        "--test-variant",
-        *args.test_variant,
-        "--accelerator",
-        args.accelerator,
-        "--devices",
-        args.devices,
-        "--seed",
-        str(args.seed),
     ]
-    if args.tile_stride is not None:
+    if args.model == "patchcore":
+        train_command.extend(
+            [
+                "--tiling",
+                args.tiling,
+                "--tile-size",
+                str(args.tile_size),
+                "--patchcore-layers",
+                *args.patchcore_layers,
+                "--patchcore-coreset-ratio",
+                str(args.patchcore_coreset_ratio),
+                "--patchcore-num-neighbors",
+                str(args.patchcore_num_neighbors),
+                "--patchcore-precision",
+                args.patchcore_precision,
+            ],
+        )
+    if args.model == "efficientad":
+        train_command.extend(
+            [
+                "--efficientad-imagenet-dir",
+                str(efficientad_imagenet_dir),
+                "--efficientad-model-size",
+                args.efficientad_model_size,
+                "--efficientad-teacher-out-channels",
+                str(args.efficientad_teacher_out_channels),
+                "--efficientad-lr",
+                str(args.efficientad_lr),
+                "--efficientad-weight-decay",
+                str(args.efficientad_weight_decay),
+            ],
+        )
+        if args.efficientad_padding:
+            train_command.append("--efficientad-padding")
+        if args.efficientad_no_pad_maps:
+            train_command.append("--efficientad-no-pad-maps")
+    train_command.extend(
+        [
+            "--test-variant",
+            *args.test_variant,
+            "--accelerator",
+            args.accelerator,
+            "--devices",
+            args.devices,
+            "--seed",
+            str(args.seed),
+        ],
+    )
+    if max_steps is not None:
+        train_command.extend(["--max-steps", str(max_steps)])
+    if args.model == "patchcore" and args.tile_stride is not None:
         train_command.extend(["--tile-stride", str(args.tile_stride)])
     run(train_command, project_root)
 
@@ -555,48 +649,80 @@ def main() -> None:
         str(image_size[0]),
         "--image-width",
         str(image_size[1]),
-        "--tiling",
-        args.tiling,
-        "--tile-size",
-        str(args.tile_size),
-        "--patchcore-layers",
-        *args.patchcore_layers,
-        "--patchcore-coreset-ratio",
-        str(args.patchcore_coreset_ratio),
-        "--patchcore-num-neighbors",
-        str(args.patchcore_num_neighbors),
-        "--patchcore-precision",
-        args.patchcore_precision,
-        "--roi-mode",
-        args.roi_mode,
-        "--fixed-roi",
-        *[str(value) for value in fixed_roi],
-        "--score-aggregation",
-        score_aggregation,
-        "--score-percentile",
-        str(args.score_percentile),
-        "--score-topk-percent",
-        str(args.score_topk_percent),
-        "--score-local-sigma",
-        str(args.score_local_sigma),
-        "--score-blob-threshold",
-        str(args.score_blob_threshold),
-        "--score-blob-strong-threshold",
-        str(args.score_blob_strong_threshold),
-        "--score-blob-min-area",
-        str(args.score_blob_min_area),
-        "--score-blob-area-weight",
-        str(args.score_blob_area_weight),
-        "--heatmap-normalization",
-        args.heatmap_normalization,
-        "--calibration-objective",
-        args.calibration_objective,
-        "--accelerator",
-        args.accelerator,
-        "--devices",
-        args.devices,
     ]
-    if args.tile_stride is not None:
+    if args.model == "patchcore":
+        infer_command.extend(
+            [
+                "--tiling",
+                args.tiling,
+                "--tile-size",
+                str(args.tile_size),
+                "--patchcore-layers",
+                *args.patchcore_layers,
+                "--patchcore-coreset-ratio",
+                str(args.patchcore_coreset_ratio),
+                "--patchcore-num-neighbors",
+                str(args.patchcore_num_neighbors),
+                "--patchcore-precision",
+                args.patchcore_precision,
+            ],
+        )
+    if args.model == "efficientad":
+        infer_command.extend(
+            [
+                "--efficientad-imagenet-dir",
+                str(efficientad_imagenet_dir),
+                "--efficientad-model-size",
+                args.efficientad_model_size,
+                "--efficientad-teacher-out-channels",
+                str(args.efficientad_teacher_out_channels),
+                "--efficientad-lr",
+                str(args.efficientad_lr),
+                "--efficientad-weight-decay",
+                str(args.efficientad_weight_decay),
+            ],
+        )
+        if args.efficientad_padding:
+            infer_command.append("--efficientad-padding")
+        if args.efficientad_no_pad_maps:
+            infer_command.append("--efficientad-no-pad-maps")
+    infer_command.extend(
+        [
+            "--roi-mode",
+            args.roi_mode,
+            "--fixed-roi",
+            *[str(value) for value in fixed_roi],
+            "--score-aggregation",
+            score_aggregation,
+        ],
+    )
+    infer_command.extend(
+        [
+            "--score-percentile",
+            str(args.score_percentile),
+            "--score-topk-percent",
+            str(args.score_topk_percent),
+            "--score-local-sigma",
+            str(args.score_local_sigma),
+            "--score-blob-threshold",
+            str(args.score_blob_threshold),
+            "--score-blob-strong-threshold",
+            str(args.score_blob_strong_threshold),
+            "--score-blob-min-area",
+            str(args.score_blob_min_area),
+            "--score-blob-area-weight",
+            str(args.score_blob_area_weight),
+            "--heatmap-normalization",
+            args.heatmap_normalization,
+            "--calibration-objective",
+            args.calibration_objective,
+            "--accelerator",
+            args.accelerator,
+            "--devices",
+            args.devices,
+        ],
+    )
+    if args.model == "patchcore" and args.tile_stride is not None:
         infer_command.extend(["--tile-stride", str(args.tile_stride)])
     if use_calibration and calibration_manifest.exists():
         infer_command.extend(["--calibration-path", str(calibration_dir)])

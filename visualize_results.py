@@ -37,6 +37,7 @@ TRAIN_METRIC_KEYS = (
 )
 MODEL_LABELS = {
     "patchcore": "PatchCore",
+    "efficientad": "EfficientAD",
     "hybrid_patchcore_unet": "Hybrid PatchCore + U-Net",
     "hybrid_patchcore_segmentation": "Hybrid PatchCore + Segmentation",
 }

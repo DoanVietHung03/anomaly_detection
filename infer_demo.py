@@ -21,16 +21,23 @@ from PIL import Image
 
 from train_demo import (
     DATASET_CHOICES,
+    DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+    DEFAULT_EFFICIENTAD_LR,
+    DEFAULT_EFFICIENTAD_MODEL_SIZE,
+    DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS,
+    DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
     DEFAULT_PATCHCORE_CORESET_RATIO,
     DEFAULT_PATCHCORE_LAYERS,
     DEFAULT_PATCHCORE_NUM_NEIGHBORS,
     DEFAULT_PATCHCORE_PRECISION,
     DEFAULT_TILING,
+    MODEL_CHOICES,
     build_model_from_args,
     build_tiling_callbacks,
     format_image_size,
     resolve_image_size,
     resolve_tiling,
+    validate_efficientad_args,
     validate_patchcore_args,
 )
 
@@ -75,22 +82,22 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore"],
-        help="Model architecture used by the checkpoint. Only PatchCore is supported.",
+        choices=MODEL_CHOICES,
+        help="Model architecture used by the checkpoint.",
     )
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path("./can"),
-        help="Path to MVTec AD 2 root. Used only to add GT masks/overlays to reports.",
+        default=Path("./VisA"),
+        help="Path to VisA or MVTec AD 2 root. Used only to add GT masks/overlays to reports.",
     )
     parser.add_argument(
         "--dataset",
         choices=DATASET_CHOICES,
-        default="mvtec_ad2",
+        default="visa",
         help="Dataset format for GT mask lookup.",
     )
-    parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category for GT masks.")
+    parser.add_argument("--category", type=str, default="candle", help="Dataset category for GT masks.")
     parser.add_argument(
         "--test-type",
         type=str,
@@ -98,7 +105,7 @@ def parse_args() -> argparse.Namespace:
         choices=["public", "private", "private_mixed"],
         help="MVTec AD 2 test split used for GT masks.",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("./demo_outputs"), help="Inference output directory.")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Inference output directory.")
     parser.add_argument(
         "--image-size",
         type=int,
@@ -106,7 +113,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional square PredictDataset image size. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="PredictDataset image height. Defaults to 384.")
-    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 837.")
+    parser.add_argument("--image-width", type=int, default=None, help="PredictDataset image width. Defaults to 384.")
     parser.add_argument(
         "--calibration-path",
         type=Path,
@@ -135,7 +142,7 @@ def parse_args() -> argparse.Namespace:
         "--roi-mode",
         choices=ROI_MODE_CHOICES,
         default=None,
-        help="Restrict score aggregation. Defaults to fixed-foreground for PatchCore.",
+        help="Restrict score aggregation. Defaults to fixed-foreground for PatchCore and off for EfficientAD.",
     )
     parser.add_argument(
         "--fixed-roi",
@@ -143,13 +150,13 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=list(DEFAULT_FIXED_ROI),
         metavar=("X1", "Y1", "X2", "Y2"),
-        help="Fixed ROI as normalized fractions of width/height. Default crops the can body and skips borders/glare edges.",
+        help="Fixed ROI as normalized fractions of width/height.",
     )
     parser.add_argument(
         "--score-aggregation",
         choices=SCORE_AGGREGATION_CHOICES,
         default=None,
-        help="Image score aggregation. Defaults to pixel-mean for PatchCore.",
+        help="Image score aggregation. Defaults to pixel-mean for PatchCore and model for EfficientAD.",
     )
     parser.add_argument(
         "--score-percentile",
@@ -197,7 +204,7 @@ def parse_args() -> argparse.Namespace:
         "--tiling",
         choices=["auto", "on", "off"],
         default=DEFAULT_TILING,
-        help="Enable tiled PatchCore inference. off is the memory-safe default for wide can images.",
+        help="Enable tiled PatchCore inference. off is the default and EfficientAD does not use tiling.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument(
@@ -232,6 +239,37 @@ def parse_args() -> argparse.Namespace:
         help="PatchCore compute precision. Must match the trained checkpoint.",
     )
     parser.add_argument(
+        "--efficientad-imagenet-dir",
+        type=Path,
+        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+        help="ImageNet/Imagenette-style folder used by EfficientAD. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--efficientad-model-size",
+        choices=["small", "medium"],
+        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
+        help="EfficientAD student/teacher size. Must match the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--efficientad-teacher-out-channels",
+        type=int,
+        default=DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS,
+        help="EfficientAD teacher output channels. Must match the trained checkpoint.",
+    )
+    parser.add_argument("--efficientad-lr", type=float, default=DEFAULT_EFFICIENTAD_LR, help="EfficientAD learning rate.")
+    parser.add_argument(
+        "--efficientad-weight-decay",
+        type=float,
+        default=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
+        help="EfficientAD optimizer weight decay.",
+    )
+    parser.add_argument("--efficientad-padding", action="store_true", help="Enable padding in EfficientAD convolutions.")
+    parser.add_argument(
+        "--efficientad-no-pad-maps",
+        action="store_true",
+        help="Do not pad EfficientAD anomaly maps when convolution padding is disabled.",
+    )
+    parser.add_argument(
         "--heatmap-normalization",
         choices=["global", "per-image"],
         default="global",
@@ -242,20 +280,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_dependencies() -> tuple[Any, Any, Any, Any, Any]:
+def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any]:
     try:
         from anomalib.callbacks import TilerConfigurationCallback
         from anomalib.data import PredictDataset
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
-        from anomalib.models import Patchcore
+        from anomalib.models import EfficientAd, Patchcore
     except Exception as exc:  # pragma: no cover - runtime safeguard
         raise SystemExit(
             "Failed to import Anomalib stack. Install dependencies first, for example:\n"
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return PredictDataset, Engine, Patchcore, TilerConfigurationCallback, ImageUpscaleMode
+    return PredictDataset, Engine, Patchcore, EfficientAd, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def install_checkpoint_compatibility_aliases() -> None:
@@ -278,12 +316,12 @@ def find_checkpoint(results_dir: Path) -> Path | None:
     return preferred[0] if preferred else ckpts[0]
 
 
-def default_score_aggregation() -> str:
-    return "pixel-mean"
+def default_score_aggregation(model_name: str) -> str:
+    return "model" if model_name == "efficientad" else "pixel-mean"
 
 
-def default_roi_mode() -> str:
-    return "fixed-foreground"
+def default_roi_mode(model_name: str) -> str:
+    return "off" if model_name == "efficientad" else "fixed-foreground"
 
 
 def flatten_predictions(predictions: Any) -> list[Any]:
@@ -465,7 +503,7 @@ def normalize_map(anomaly_map: np.ndarray, min_v: float | None = None, max_v: fl
 
 
 def foreground_mask_from_image(image_rgb: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
-    """Estimate the can foreground and resize it to the anomaly-map resolution."""
+    """Estimate the object foreground and resize it to the anomaly-map resolution."""
     if image_rgb.size == 0:
         return np.ones(target_hw, dtype=bool)
 
@@ -717,7 +755,7 @@ def find_gt_mask_path(
     test_type: str,
     image_path: Path,
     gt_label: str | None,
-    dataset: str = "mvtec_ad2",
+    dataset: str = "visa",
 ) -> Path | None:
     if gt_label != "bad":
         return None
@@ -755,7 +793,7 @@ def load_gt_mask(
     image_path: Path,
     image_hw: tuple[int, int],
     gt_label: str | None,
-    dataset: str = "mvtec_ad2",
+    dataset: str = "visa",
 ) -> tuple[np.ndarray, Path | None]:
     target_h, target_w = image_hw
     mask_path = find_gt_mask_path(dataset_root, category, test_type, image_path, gt_label, dataset)
@@ -1078,16 +1116,21 @@ def main() -> None:
         predict_dataset_cls,
         engine_cls,
         patchcore_cls,
+        efficientad_cls,
         tiler_callback_cls,
         upscale_mode_cls,
     ) = import_dependencies()
     install_checkpoint_compatibility_aliases()
     image_size = resolve_image_size(args)
+    if args.output_dir is None:
+        args.output_dir = Path(f"./demo_outputs_{args.model}_{args.dataset}_{args.category}")
     if args.score_aggregation is None:
-        args.score_aggregation = default_score_aggregation()
-    args.roi_mode = args.roi_mode or default_roi_mode()
+        args.score_aggregation = default_score_aggregation(args.model)
+    args.roi_mode = args.roi_mode or default_roi_mode(args.model)
     fixed_roi = validate_fixed_roi(args.fixed_roi)
     tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
+    if args.model == "efficientad":
+        validate_efficientad_args(args)
 
     ckpt_path = args.checkpoint
     if ckpt_path is None:
@@ -1143,10 +1186,10 @@ def main() -> None:
     ):
         d.mkdir(parents=True, exist_ok=True)
 
-    model = build_model_from_args(args, patchcore_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, efficientad_cls, image_size)
     configure_score_mode(model, args.score_mode)
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
-    precision_flag = "16-true" if args.patchcore_precision == "float16" else "32"
+    precision_flag = "16-true" if args.model == "patchcore" and args.patchcore_precision == "float16" else "32"
     engine = engine_cls(
         callbacks=callbacks,
         accelerator=args.accelerator,
@@ -1329,7 +1372,7 @@ def main() -> None:
     if score_auc_value is not None and float(score_auc_value) < 0.6:
         print(
             "[WARN] Prediction scores have weak good/bad separation "
-            f"(AUC={float(score_auc_value):.3f}). Try a larger aspect-preserving image size or different PatchCore settings.",
+            f"(AUC={float(score_auc_value):.3f}). Try a larger image size or different model settings.",
         )
 
     csv_path = args.output_dir / "predictions.csv"
@@ -1353,10 +1396,17 @@ def main() -> None:
         "image_height": image_size[0],
         "image_width": image_size[1],
         "tiling": tiling_config,
-        "patchcore_layers": list(validate_patchcore_args(args)),
-        "patchcore_coreset_ratio": args.patchcore_coreset_ratio,
-        "patchcore_num_neighbors": args.patchcore_num_neighbors,
-        "patchcore_precision": args.patchcore_precision,
+        "patchcore_layers": list(validate_patchcore_args(args)) if args.model == "patchcore" else None,
+        "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
+        "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
+        "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
+        "efficientad_imagenet_dir": str(args.efficientad_imagenet_dir) if args.model == "efficientad" else None,
+        "efficientad_model_size": args.efficientad_model_size if args.model == "efficientad" else None,
+        "efficientad_teacher_out_channels": args.efficientad_teacher_out_channels if args.model == "efficientad" else None,
+        "efficientad_lr": args.efficientad_lr if args.model == "efficientad" else None,
+        "efficientad_weight_decay": args.efficientad_weight_decay if args.model == "efficientad" else None,
+        "efficientad_padding": args.efficientad_padding if args.model == "efficientad" else None,
+        "efficientad_pad_maps": (not args.efficientad_no_pad_maps) if args.model == "efficientad" else None,
         "score_mode": args.score_mode,
         "score_aggregation": args.score_aggregation,
         "score_percentile": args.score_percentile,
@@ -1388,9 +1438,13 @@ def main() -> None:
     print(f"[INFO] Checkpoint : {ckpt_path}")
     print(f"[INFO] Image size : {format_image_size(image_size)}")
     print(f"[INFO] Tiling     : {tiling_config}")
-    print(f"[INFO] Layers     : {','.join(validate_patchcore_args(args))}")
-    print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
-    print(f"[INFO] Precision  : {args.patchcore_precision}")
+    if args.model == "patchcore":
+        print(f"[INFO] Layers     : {','.join(validate_patchcore_args(args))}")
+        print(f"[INFO] Coreset    : {args.patchcore_coreset_ratio}")
+        print(f"[INFO] Precision  : {args.patchcore_precision}")
+    else:
+        print(f"[INFO] Model size : {args.efficientad_model_size}")
+        print(f"[INFO] ImageNet   : {args.efficientad_imagenet_dir}")
     print(f"[INFO] Score mode : {args.score_mode}")
     print(f"[INFO] Aggregator : {args.score_aggregation} ({args.roi_mode})")
     if args.score_aggregation in {"blob-count", "blob-score"}:

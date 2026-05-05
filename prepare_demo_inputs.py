@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy a small, mixed set of public test images into a demo input folder."""
+"""Copy a small, mixed set of dataset test images into a demo input folder."""
 
 from __future__ import annotations
 
@@ -19,15 +19,15 @@ DATASET_CHOICES = ("mvtec_ad2", "visa")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare a small demo input folder from MVTec AD 2 test_public.")
+    parser = argparse.ArgumentParser(description="Prepare a small demo input folder from VisA or MVTec AD 2.")
     parser.add_argument(
         "--dataset",
         choices=DATASET_CHOICES,
-        default="mvtec_ad2",
+        default="visa",
         help="Dataset format. Use visa for the VisA dataset.",
     )
-    parser.add_argument("--dataset-root", type=Path, required=True, help="Path to MVTec_AD_2 root.")
-    parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category.")
+    parser.add_argument("--dataset-root", type=Path, default=Path("./VisA"), help="Path to VisA or MVTec_AD_2 root.")
+    parser.add_argument("--category", type=str, default="candle", help="Dataset category.")
     parser.add_argument("--output-dir", type=Path, default=Path("./demo_inputs"), help="Output folder.")
     parser.add_argument("--num-good", type=int, default=8, help="Number of good images to sample.")
     parser.add_argument("--num-bad", type=int, default=8, help="Number of anomalous images to sample.")

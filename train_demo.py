@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Train an anomaly detection demo on MVTec AD 2 / can.
+"""Train an anomaly detection demo on VisA or MVTec AD 2.
 
-This script focuses on a minimal, reproducible PatchCore training flow.
+This script focuses on a minimal, reproducible training flow for PatchCore and EfficientAD.
 It trains on defect-free data and evaluates on the public test split.
 """
 
@@ -26,12 +26,19 @@ VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
 VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
 DATASET_CHOICES = ("mvtec_ad2", "visa")
-DEFAULT_IMAGE_SIZE = (384, 837)
+MODEL_CHOICES = ("patchcore", "efficientad")
+DEFAULT_IMAGE_SIZE = (384, 384)
 DEFAULT_TILING = "off"
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
 DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
 DEFAULT_PATCHCORE_PRECISION = "float16"
+DEFAULT_EFFICIENTAD_IMAGENET_DIR = Path("./datasets/imagenette")
+DEFAULT_EFFICIENTAD_MODEL_SIZE = "small"
+DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS = 384
+DEFAULT_EFFICIENTAD_LR = 1e-4
+DEFAULT_EFFICIENTAD_WEIGHT_DECAY = 1e-5
+DEFAULT_EFFICIENTAD_MAX_STEPS = 70_000
 
 
 class SafeMVTecAD2(_MVTecAD2Base):
@@ -65,23 +72,23 @@ SafeMVTecAD2.__module__ = "train_demo"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train MVTec AD 2 demo model.")
+    parser = argparse.ArgumentParser(description="Train a VisA/MVTec demo anomaly detector.")
     parser.add_argument(
         "--dataset",
         choices=DATASET_CHOICES,
-        default="mvtec_ad2",
+        default="visa",
         help="Dataset format. Use visa for the VisA dataset.",
     )
-    parser.add_argument("--dataset-root", type=Path, required=True, help="Path to MVTec_AD_2 root.")
-    parser.add_argument("--category", type=str, default="can", help="MVTec AD 2 category.")
+    parser.add_argument("--dataset-root", type=Path, default=Path("./VisA"), help="Path to VisA or MVTec_AD_2 root.")
+    parser.add_argument("--category", type=str, default="candle", help="Dataset category.")
     parser.add_argument(
         "--model",
         type=str,
         default="patchcore",
-        choices=["patchcore"],
-        help="Model to train. Only PatchCore is supported.",
+        choices=MODEL_CHOICES,
+        help="Model to train.",
     )
-    parser.add_argument("--results-dir", type=Path, default=Path("./runs"), help="Output directory.")
+    parser.add_argument("--results-dir", type=Path, default=None, help="Output directory.")
     parser.add_argument("--epochs", type=int, default=30, help="Training epochs.")
     parser.add_argument("--train-batch-size", type=int, default=1, help="Override train batch size.")
     parser.add_argument("--eval-batch-size", type=int, default=1, help="Eval/test batch size.")
@@ -92,13 +99,13 @@ def parse_args() -> argparse.Namespace:
         help="Optional square image size for model preprocessing. Overridden by --image-height/--image-width.",
     )
     parser.add_argument("--image-height", type=int, default=None, help="Model input height. Defaults to 384.")
-    parser.add_argument("--image-width", type=int, default=None, help="Model input width. Defaults to 837.")
+    parser.add_argument("--image-width", type=int, default=None, help="Model input width. Defaults to 384.")
     parser.add_argument("--num-workers", type=int, default=4, help="Data loader workers.")
     parser.add_argument(
         "--tiling",
         choices=["auto", "on", "off"],
         default=DEFAULT_TILING,
-        help="Enable tiled PatchCore processing. off is the memory-safe default for wide can images.",
+        help="Enable tiled PatchCore processing. off is the default and EfficientAD does not use tiling.",
     )
     parser.add_argument("--tile-size", type=int, default=512, help="PatchCore tile size when tiling is enabled.")
     parser.add_argument(
@@ -131,6 +138,43 @@ def parse_args() -> argparse.Namespace:
         choices=["float16", "float32"],
         default=DEFAULT_PATCHCORE_PRECISION,
         help="PatchCore compute precision. float16 is the memory-safe default; use float32 only if memory allows.",
+    )
+    parser.add_argument(
+        "--efficientad-imagenet-dir",
+        type=Path,
+        default=DEFAULT_EFFICIENTAD_IMAGENET_DIR,
+        help="ImageNet/Imagenette-style folder used by EfficientAD's penalty branch.",
+    )
+    parser.add_argument(
+        "--efficientad-model-size",
+        choices=["small", "medium"],
+        default=DEFAULT_EFFICIENTAD_MODEL_SIZE,
+        help="EfficientAD student/teacher size.",
+    )
+    parser.add_argument(
+        "--efficientad-teacher-out-channels",
+        type=int,
+        default=DEFAULT_EFFICIENTAD_TEACHER_OUT_CHANNELS,
+        help="EfficientAD teacher output channels.",
+    )
+    parser.add_argument("--efficientad-lr", type=float, default=DEFAULT_EFFICIENTAD_LR, help="EfficientAD learning rate.")
+    parser.add_argument(
+        "--efficientad-weight-decay",
+        type=float,
+        default=DEFAULT_EFFICIENTAD_WEIGHT_DECAY,
+        help="EfficientAD optimizer weight decay.",
+    )
+    parser.add_argument("--efficientad-padding", action="store_true", help="Enable padding in EfficientAD convolutions.")
+    parser.add_argument(
+        "--efficientad-no-pad-maps",
+        action="store_true",
+        help="Do not pad EfficientAD anomaly maps when convolution padding is disabled.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Optional Lightning max_steps. EfficientAD defaults to 70000 when omitted; when set, it overrides the epoch limit.",
     )
     parser.add_argument(
         "--test-type",
@@ -168,7 +212,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
         from anomalib.data import MVTecAD2, Visa
         from anomalib.data.utils.tiler import ImageUpscaleMode
         from anomalib.engine import Engine
-        from anomalib.models import Patchcore
+        from anomalib.models import EfficientAd, Patchcore
         from lightning.pytorch import seed_everything
         from lightning.pytorch.loggers import CSVLogger
     except Exception as exc:  # pragma: no cover - runtime safeguard
@@ -177,7 +221,7 @@ def import_dependencies() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
             "  python -m pip install -r requirements.txt\n"
             f"Original error: {exc}"
         ) from exc
-    return (MVTecAD2, Visa), Engine, Patchcore, seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
+    return (MVTecAD2, Visa), Engine, (Patchcore, EfficientAd), seed_everything, CSVLogger, TilerConfigurationCallback, ImageUpscaleMode
 
 
 def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
@@ -268,21 +312,48 @@ def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
     return layers
 
 
+def validate_efficientad_args(args: argparse.Namespace) -> None:
+    if args.efficientad_teacher_out_channels <= 0:
+        raise SystemExit("--efficientad-teacher-out-channels must be a positive integer.")
+    if args.efficientad_lr <= 0.0:
+        raise SystemExit("--efficientad-lr must be positive.")
+    if args.efficientad_weight_decay < 0.0:
+        raise SystemExit("--efficientad-weight-decay must be non-negative.")
+    max_steps = getattr(args, "max_steps", None)
+    if max_steps is not None and max_steps <= 0:
+        raise SystemExit("--max-steps must be a positive integer.")
+
+
 def build_model_from_args(
     args: argparse.Namespace,
     patchcore_cls: Any,
+    efficientad_cls: Any,
     image_size: tuple[int, int],
 ) -> Any:
     pre_processor_size = image_size
-    layers = validate_patchcore_args(args)
-    return patchcore_cls(
-        backbone="wide_resnet50_2",
-        layers=layers,
-        coreset_sampling_ratio=args.patchcore_coreset_ratio,
-        num_neighbors=args.patchcore_num_neighbors,
-        precision=args.patchcore_precision,
-        pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
-    )
+    if args.model == "patchcore":
+        layers = validate_patchcore_args(args)
+        return patchcore_cls(
+            backbone="wide_resnet50_2",
+            layers=layers,
+            coreset_sampling_ratio=args.patchcore_coreset_ratio,
+            num_neighbors=args.patchcore_num_neighbors,
+            precision=args.patchcore_precision,
+            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
+    if args.model == "efficientad":
+        validate_efficientad_args(args)
+        return efficientad_cls(
+            imagenet_dir=args.efficientad_imagenet_dir,
+            teacher_out_channels=args.efficientad_teacher_out_channels,
+            model_size=args.efficientad_model_size,
+            lr=args.efficientad_lr,
+            weight_decay=args.efficientad_weight_decay,
+            padding=args.efficientad_padding,
+            pad_maps=not args.efficientad_no_pad_maps,
+            pre_processor=efficientad_cls.configure_pre_processor(image_size=pre_processor_size),
+        )
+    raise ValueError(f"Unsupported model: {args.model}")
 
 
 def normalize_variant_selection(variants: Iterable[str] | None) -> set[str] | None:
@@ -406,8 +477,8 @@ def print_patchcore_profile_warnings(args: argparse.Namespace, image_size: tuple
         print("[WARN] PatchCore is running without layer3; image-level scores may miss broader object context.")
     if args.patchcore_coreset_ratio < 0.05:
         print("[WARN] PatchCore coreset ratio is below 0.05; normal edge cases may be under-represented.")
-    if image_size[0] == image_size[1]:
-        print("[WARN] Square PatchCore input distorts the wide can images. Prefer an aspect-preserving size such as 384x837.")
+    if args.dataset != "visa" and image_size[0] == image_size[1]:
+        print("[WARN] Square PatchCore input can distort wide images. Prefer an aspect-preserving size for non-VisA datasets.")
     if tiling_config["enabled"] and max(image_size) / min(image_size) >= 1.5:
         print("[WARN] Tiling on wide images creates multiple overlapping tiles and can exhaust GPU memory.")
 
@@ -446,18 +517,25 @@ def main() -> None:
     (
         datamodule_classes,
         engine_cls,
-        patchcore_cls,
+        model_classes,
         seed_everything,
         csv_logger_cls,
         tiler_callback_cls,
         upscale_mode_cls,
     ) = import_dependencies()
     mvtec_ad2_cls, visa_cls = datamodule_classes
+    patchcore_cls, efficientad_cls = model_classes
     safe_mvtec_ad2_cls = make_safe_mvtec_ad2_cls(mvtec_ad2_cls)
 
+    if args.results_dir is None:
+        args.results_dir = Path(f"./runs_{args.model}_{args.dataset}_{args.category}")
     args.results_dir.mkdir(parents=True, exist_ok=True)
     seed_everything(args.seed, workers=True)
     image_size = resolve_image_size(args)
+    if args.model == "efficientad" and args.max_steps is None:
+        args.max_steps = DEFAULT_EFFICIENTAD_MAX_STEPS
+    if args.max_steps is not None and args.max_steps <= 0:
+        raise SystemExit("--max-steps must be a positive integer.")
     tiling_config = resolve_tiling(args.model, args.tiling, args.tile_size, args.tile_stride, image_size)
     selected_test_variants = normalize_variant_selection(args.test_variant)
     if args.dataset == "visa":
@@ -468,6 +546,8 @@ def main() -> None:
     train_batch_size = args.train_batch_size
     if train_batch_size is None:
         train_batch_size = 1
+    if args.model == "efficientad" and train_batch_size != 1:
+        raise SystemExit("EfficientAD requires --train-batch-size 1.")
 
     if args.dataset == "visa":
         datamodule = visa_cls(
@@ -490,24 +570,27 @@ def main() -> None:
             seed=args.seed,
         )
 
-    model = build_model_from_args(args, patchcore_cls, image_size)
+    model = build_model_from_args(args, patchcore_cls, efficientad_cls, image_size)
     csv_logger = csv_logger_cls(
         save_dir=str(args.results_dir / "logs"),
         name=f"{args.model}_{args.category}",
     )
     callbacks = build_tiling_callbacks(tiling_config, tiler_callback_cls, upscale_mode_cls)
 
-    precision_flag = "16-true" if args.patchcore_precision == "float16" else "32"
+    precision_flag = "16-true" if args.model == "patchcore" and args.patchcore_precision == "float16" else "32"
+    engine_kwargs = {
+        "callbacks": callbacks,
+        "default_root_dir": str(args.results_dir),
+        "max_epochs": -1 if args.max_steps is not None else args.epochs,
+        "accelerator": args.accelerator,
+        "devices": args.devices,
+        "logger": csv_logger,
+        "precision": precision_flag,
+    }
+    if args.max_steps is not None:
+        engine_kwargs["max_steps"] = args.max_steps
 
-    engine = engine_cls(
-        callbacks=callbacks,
-        default_root_dir=str(args.results_dir),
-        max_epochs=args.epochs,
-        accelerator=args.accelerator,
-        devices=args.devices,
-        logger=csv_logger,
-        precision=precision_flag,
-    )
+    engine = engine_cls(**engine_kwargs)
 
     print("=" * 80)
     print("[INFO] Starting training")
@@ -517,9 +600,17 @@ def main() -> None:
     print(f"[INFO] model       : {args.model}")
     print(f"[INFO] image_size  : {format_image_size(image_size)}")
     print(f"[INFO] tiling      : {tiling_config}")
-    print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
-    print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
-    print(f"[INFO] precision   : {args.patchcore_precision}")
+    if args.max_steps is not None:
+        print(f"[INFO] max_steps   : {args.max_steps}")
+    if args.model == "patchcore":
+        print(f"[INFO] layers      : {','.join(validate_patchcore_args(args))}")
+        print(f"[INFO] coreset     : {args.patchcore_coreset_ratio}")
+        print(f"[INFO] precision   : {args.patchcore_precision}")
+    else:
+        print(f"[INFO] model_size  : {args.efficientad_model_size}")
+        print(f"[INFO] imagenet_dir: {args.efficientad_imagenet_dir}")
+        print(f"[INFO] lr          : {args.efficientad_lr}")
+        print(f"[INFO] weight_decay: {args.efficientad_weight_decay}")
     if args.dataset != "visa":
         print(f"[INFO] test_type   : {args.test_type}")
         print(f"[INFO] test_variant: {format_variant_selection(args.test_variant)}")
@@ -528,7 +619,8 @@ def main() -> None:
     if args.dataset != "visa":
         print_domain_shift_warning(dataset_variant_summary, selected_test_variants)
         print_threshold_warning(dataset_variant_summary)
-    print_patchcore_profile_warnings(args, image_size, tiling_config)
+    if args.model == "patchcore":
+        print_patchcore_profile_warnings(args, image_size, tiling_config)
     print("=" * 80)
 
     engine.fit(model=model, datamodule=datamodule)
@@ -558,14 +650,22 @@ def main() -> None:
         "category": args.category,
         "model": args.model,
         "epochs": args.epochs,
+        "max_steps": args.max_steps,
         "image_size": format_image_size(image_size),
         "image_height": image_size[0],
         "image_width": image_size[1],
         "tiling": tiling_config,
-        "patchcore_layers": list(validate_patchcore_args(args)),
-        "patchcore_coreset_ratio": args.patchcore_coreset_ratio,
-        "patchcore_num_neighbors": args.patchcore_num_neighbors,
-        "patchcore_precision": args.patchcore_precision,
+        "patchcore_layers": list(validate_patchcore_args(args)) if args.model == "patchcore" else None,
+        "patchcore_coreset_ratio": args.patchcore_coreset_ratio if args.model == "patchcore" else None,
+        "patchcore_num_neighbors": args.patchcore_num_neighbors if args.model == "patchcore" else None,
+        "patchcore_precision": args.patchcore_precision if args.model == "patchcore" else None,
+        "efficientad_imagenet_dir": args.efficientad_imagenet_dir if args.model == "efficientad" else None,
+        "efficientad_model_size": args.efficientad_model_size if args.model == "efficientad" else None,
+        "efficientad_teacher_out_channels": args.efficientad_teacher_out_channels if args.model == "efficientad" else None,
+        "efficientad_lr": args.efficientad_lr if args.model == "efficientad" else None,
+        "efficientad_weight_decay": args.efficientad_weight_decay if args.model == "efficientad" else None,
+        "efficientad_padding": args.efficientad_padding if args.model == "efficientad" else None,
+        "efficientad_pad_maps": (not args.efficientad_no_pad_maps) if args.model == "efficientad" else None,
         "train_batch_size": train_batch_size,
         "eval_batch_size": args.eval_batch_size,
         "num_workers": args.num_workers,
