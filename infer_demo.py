@@ -19,20 +19,30 @@ import cv2
 import numpy as np
 from PIL import Image
 
-DEFAULT_IMAGE_SIZE = (384, 837)
-DEFAULT_TILING = "off"
-DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
-DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
-DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
-DEFAULT_PATCHCORE_PRECISION = "float16"
-DEFAULT_PADIM_BACKBONE = "resnet18"
-DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
-DEFAULT_PADIM_N_FEATURES = 100
-DEFAULT_FASTFLOW_BACKBONE = "resnet18"
-DEFAULT_FASTFLOW_FLOW_STEPS = 8
-DEFAULT_FASTFLOW_HIDDEN_RATIO = 1.0
+from train_demo import (
+    DATASET_CHOICES,
+    DEFAULT_FASTFLOW_BACKBONE,
+    DEFAULT_FASTFLOW_FLOW_STEPS,
+    DEFAULT_FASTFLOW_HIDDEN_RATIO,
+    DEFAULT_PADIM_BACKBONE,
+    DEFAULT_PADIM_LAYERS,
+    DEFAULT_PADIM_N_FEATURES,
+    DEFAULT_PATCHCORE_CORESET_RATIO,
+    DEFAULT_PATCHCORE_LAYERS,
+    DEFAULT_PATCHCORE_NUM_NEIGHBORS,
+    DEFAULT_PATCHCORE_PRECISION,
+    DEFAULT_TILING,
+    build_model_from_args,
+    build_tiling_callbacks,
+    format_image_size,
+    resolve_image_size,
+    resolve_tiling,
+    validate_fastflow_args,
+    validate_padim_args,
+    validate_patchcore_args,
+)
+
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
-DATASET_CHOICES = ("mvtec_ad2", "visa")
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
 SCORE_AGGREGATION_CHOICES = (
     "model",
@@ -316,141 +326,6 @@ def find_checkpoint(results_dir: Path) -> Path | None:
     return preferred[0] if preferred else ckpts[0]
 
 
-def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
-    if args.image_height is not None or args.image_width is not None:
-        if args.image_height is None or args.image_width is None:
-            raise SystemExit("Pass both --image-height and --image-width, or neither.")
-        image_size = (args.image_height, args.image_width)
-    elif args.image_size is not None:
-        image_size = (args.image_size, args.image_size)
-    else:
-        image_size = DEFAULT_IMAGE_SIZE
-
-    if image_size[0] <= 0 or image_size[1] <= 0:
-        raise SystemExit("Image height and width must be positive integers.")
-    return image_size
-
-
-def format_image_size(image_size: tuple[int, int]) -> str:
-    return f"{image_size[0]}x{image_size[1]}"
-
-
-def should_enable_tiling(model_name: str, tiling: str) -> bool:
-    if tiling == "off":
-        return False
-    if tiling == "on":
-        return True
-    return model_name == "patchcore"
-
-
-def resolve_tiling(
-    model_name: str,
-    tiling: str,
-    tile_size: int,
-    tile_stride: int | None,
-    image_size: tuple[int, int],
-) -> dict[str, Any]:
-    enabled = should_enable_tiling(model_name, tiling)
-    if not enabled:
-        return {"enabled": False, "tile_size": None, "tile_stride": None}
-    if model_name != "patchcore":
-        raise SystemExit("Tiling is only supported for PatchCore in this demo.")
-    if tile_size <= 0:
-        raise SystemExit("--tile-size must be a positive integer.")
-
-    max_tile = min(image_size)
-    effective_tile_size = min(tile_size, max_tile)
-    if effective_tile_size != tile_size:
-        print(
-            f"[WARN] Requested tile size {tile_size} exceeds image size {format_image_size(image_size)}; "
-            f"using {effective_tile_size}.",
-        )
-
-    stride = tile_stride if tile_stride is not None else max(1, effective_tile_size // 2)
-    if stride <= 0:
-        raise SystemExit("--tile-stride must be a positive integer.")
-    if stride > effective_tile_size:
-        print(f"[WARN] Requested tile stride {stride} exceeds tile size {effective_tile_size}; using {effective_tile_size}.")
-        stride = effective_tile_size
-
-    return {"enabled": True, "tile_size": effective_tile_size, "tile_stride": stride}
-
-
-def build_tiling_callbacks(
-    tiling_config: dict[str, Any],
-    tiler_callback_cls: Any,
-    upscale_mode_cls: Any,
-) -> list[Any]:
-    if not tiling_config["enabled"]:
-        return []
-    return [
-        tiler_callback_cls(
-            enable=True,
-            tile_size=int(tiling_config["tile_size"]),
-            stride=int(tiling_config["tile_stride"]),
-            mode=upscale_mode_cls.PADDING,
-        ),
-    ]
-
-
-def build_model(model_name: str, patchcore_cls: Any, padim_cls: Any, fastflow_cls: Any, image_size: tuple[int, int]) -> Any:
-    pre_processor_size = image_size
-    if model_name == "patchcore":
-        return patchcore_cls(
-            backbone="wide_resnet50_2",
-            layers=DEFAULT_PATCHCORE_LAYERS,
-            coreset_sampling_ratio=DEFAULT_PATCHCORE_CORESET_RATIO,
-            num_neighbors=DEFAULT_PATCHCORE_NUM_NEIGHBORS,
-            precision=DEFAULT_PATCHCORE_PRECISION,
-            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    if model_name == "padim":
-        return padim_cls(
-            backbone=DEFAULT_PADIM_BACKBONE,
-            layers=list(DEFAULT_PADIM_LAYERS),
-            pre_trained=True,
-            n_features=DEFAULT_PADIM_N_FEATURES,
-            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    if model_name == "fastflow":
-        return fastflow_cls(
-            backbone=DEFAULT_FASTFLOW_BACKBONE,
-            pre_trained=True,
-            flow_steps=DEFAULT_FASTFLOW_FLOW_STEPS,
-            conv3x3_only=False,
-            hidden_ratio=DEFAULT_FASTFLOW_HIDDEN_RATIO,
-            pre_processor=fastflow_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    raise ValueError(f"Unsupported model: {model_name}")
-
-
-def validate_patchcore_args(args: argparse.Namespace) -> tuple[str, ...]:
-    layers = tuple(dict.fromkeys(args.patchcore_layers))
-    if not layers:
-        raise SystemExit("--patchcore-layers must include at least one layer.")
-    if not (0.0 < args.patchcore_coreset_ratio <= 1.0):
-        raise SystemExit("--patchcore-coreset-ratio must be in the range (0, 1].")
-    if args.patchcore_num_neighbors <= 0:
-        raise SystemExit("--patchcore-num-neighbors must be a positive integer.")
-    return layers
-
-
-def validate_padim_args(args: argparse.Namespace) -> tuple[str, ...]:
-    layers = tuple(dict.fromkeys(args.padim_layers))
-    if not layers:
-        raise SystemExit("--padim-layers must include at least one layer.")
-    if args.padim_n_features <= 0:
-        raise SystemExit("--padim-n-features must be a positive integer.")
-    return layers
-
-
-def validate_fastflow_args(args: argparse.Namespace) -> None:
-    if args.fastflow_flow_steps <= 0:
-        raise SystemExit("--fastflow-flow-steps must be a positive integer.")
-    if args.fastflow_hidden_ratio <= 0.0:
-        raise SystemExit("--fastflow-hidden-ratio must be positive.")
-
-
 def default_score_aggregation(model_name: str) -> str:
     if model_name == "padim":
         return "pixel-percentile"
@@ -461,46 +336,6 @@ def default_score_aggregation(model_name: str) -> str:
 
 def default_roi_mode(model_name: str) -> str:
     return "foreground" if model_name in {"padim", "fastflow"} else "fixed-foreground"
-
-
-def build_model_from_args(
-    args: argparse.Namespace,
-    patchcore_cls: Any,
-    padim_cls: Any,
-    fastflow_cls: Any,
-    image_size: tuple[int, int],
-) -> Any:
-    pre_processor_size = image_size
-    if args.model == "patchcore":
-        layers = validate_patchcore_args(args)
-        return patchcore_cls(
-            backbone="wide_resnet50_2",
-            layers=layers,
-            coreset_sampling_ratio=args.patchcore_coreset_ratio,
-            num_neighbors=args.patchcore_num_neighbors,
-            precision=args.patchcore_precision,
-            pre_processor=patchcore_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    if args.model == "padim":
-        layers = validate_padim_args(args)
-        return padim_cls(
-            backbone=args.padim_backbone,
-            layers=list(layers),
-            pre_trained=True,
-            n_features=args.padim_n_features,
-            pre_processor=padim_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    if args.model == "fastflow":
-        validate_fastflow_args(args)
-        return fastflow_cls(
-            backbone=args.fastflow_backbone,
-            pre_trained=True,
-            flow_steps=args.fastflow_flow_steps,
-            conv3x3_only=args.fastflow_conv3x3_only,
-            hidden_ratio=args.fastflow_hidden_ratio,
-            pre_processor=fastflow_cls.configure_pre_processor(image_size=pre_processor_size),
-        )
-    return build_model(args.model, patchcore_cls, padim_cls, fastflow_cls, image_size)
 
 
 def flatten_predictions(predictions: Any) -> list[Any]:

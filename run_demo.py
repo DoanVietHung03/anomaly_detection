@@ -13,22 +13,24 @@ from pathlib import Path
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+from train_demo import (
+    DATASET_CHOICES,
+    DEFAULT_FASTFLOW_BACKBONE,
+    DEFAULT_FASTFLOW_FLOW_STEPS,
+    DEFAULT_FASTFLOW_HIDDEN_RATIO,
+    DEFAULT_PADIM_BACKBONE,
+    DEFAULT_PADIM_LAYERS,
+    DEFAULT_PADIM_N_FEATURES,
+    DEFAULT_PATCHCORE_CORESET_RATIO,
+    DEFAULT_PATCHCORE_LAYERS,
+    DEFAULT_PATCHCORE_NUM_NEIGHBORS,
+    DEFAULT_PATCHCORE_PRECISION,
+    DEFAULT_TILING,
+    VARIANT_CHOICES,
+    resolve_image_size,
+)
+
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-IMAGE_VARIANTS = ("regular", "overexposed", "underexposed", "shift_1", "shift_2", "shift_3")
-VARIANT_CHOICES = ("all", *IMAGE_VARIANTS)
-DATASET_CHOICES = ("mvtec_ad2", "visa")
-DEFAULT_IMAGE_SIZE = (384, 837)
-DEFAULT_TILING = "off"
-DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
-DEFAULT_PATCHCORE_CORESET_RATIO = 0.05
-DEFAULT_PATCHCORE_NUM_NEIGHBORS = 9
-DEFAULT_PATCHCORE_PRECISION = "float16"
-DEFAULT_PADIM_BACKBONE = "resnet18"
-DEFAULT_PADIM_LAYERS = ("layer1", "layer2", "layer3")
-DEFAULT_PADIM_N_FEATURES = 100
-DEFAULT_FASTFLOW_BACKBONE = "resnet18"
-DEFAULT_FASTFLOW_FLOW_STEPS = 8
-DEFAULT_FASTFLOW_HIDDEN_RATIO = 1.0
 DEFAULT_FIXED_ROI = (0.06, 0.10, 0.94, 0.90)
 ROI_MODE_CHOICES = ("fixed-foreground", "fixed", "foreground", "off")
 SCORE_AGGREGATION_CHOICES = (
@@ -306,21 +308,6 @@ def default_roi_mode(model: str) -> str:
 
 def default_train_batch_size(model: str) -> int:
     return 8 if model in {"padim", "fastflow"} else 1
-
-
-def resolve_image_size(args: argparse.Namespace) -> tuple[int, int]:
-    if args.image_height is not None or args.image_width is not None:
-        if args.image_height is None or args.image_width is None:
-            raise SystemExit("Pass both --image-height and --image-width, or neither.")
-        image_size = (args.image_height, args.image_width)
-    elif args.image_size is not None:
-        image_size = (args.image_size, args.image_size)
-    else:
-        image_size = DEFAULT_IMAGE_SIZE
-
-    if image_size[0] <= 0 or image_size[1] <= 0:
-        raise SystemExit("Image height and width must be positive integers.")
-    return image_size
 
 
 def validate_fixed_roi(values: list[float] | tuple[float, ...]) -> tuple[float, float, float, float]:
