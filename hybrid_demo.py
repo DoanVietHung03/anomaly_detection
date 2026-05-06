@@ -39,7 +39,24 @@ from train_demo import (
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-DEFAULT_IMAGE_SIZE = (384, 384)
+DEFAULT_IMAGE_SIZE = (512, 512)
+DEFAULT_HYBRID_BATCH_SIZE = 4
+DEFAULT_SEG_ARCH = "fpn"
+DEFAULT_SEG_ENCODER = "efficientnet-b0"
+DEFAULT_SEG_ENCODER_WEIGHTS = "imagenet"
+DEFAULT_HYBRID_TRAIN_CROP_SIZE = 512
+DEFAULT_DEFECT_CROP_PROB = 0.90
+DEFAULT_SMALL_DEFECT_OVERSAMPLE = 4.0
+DEFAULT_BCE_WEIGHT = 0.5
+DEFAULT_DICE_WEIGHT = 1.0
+DEFAULT_FOCAL_WEIGHT = 0.75
+DEFAULT_FOCAL_ALPHA = 0.80
+DEFAULT_FOCAL_GAMMA = 2.0
+DEFAULT_TVERSKY_WEIGHT = 0.75
+DEFAULT_TVERSKY_ALPHA = 0.30
+DEFAULT_TVERSKY_BETA = 0.70
+DEFAULT_POSTPROCESS_MIN_COMPONENT_AREA = 40
+DEFAULT_FALLBACK_MASK_SOURCE = "base_if_small"
 BASE_MODEL_CHOICES = MODEL_CHOICES
 DEFAULT_PATCHCORE_LAYERS = ("layer2", "layer3")
 DEFAULT_PATCHCORE_CORESET_RATIO = 0.10
@@ -130,20 +147,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-good", type=int, default=50)
     parser.add_argument("--test-bad", type=int, default=20)
     parser.add_argument("--hybrid-epochs", type=int, default=40)
-    parser.add_argument("--hybrid-batch-size", type=int, default=8)
+    parser.add_argument("--hybrid-batch-size", type=int, default=DEFAULT_HYBRID_BATCH_SIZE)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument(
         "--seg-arch",
         choices=["small_unet", "fpn", "unetpp", "deeplabv3p"],
-        default="small_unet",
+        default=DEFAULT_SEG_ARCH,
         help="Hybrid segmentation architecture. fpn/unetpp/deeplabv3p require segmentation-models-pytorch.",
     )
-    parser.add_argument("--seg-encoder", default="resnet34", help="Pretrained encoder for SMP segmentation models.")
+    parser.add_argument("--seg-encoder", default=DEFAULT_SEG_ENCODER, help="Pretrained encoder for SMP segmentation models.")
     parser.add_argument(
         "--seg-encoder-weights",
-        default="imagenet",
+        default=DEFAULT_SEG_ENCODER_WEIGHTS,
         help="Encoder weights for SMP models. Use none on offline servers.",
     )
     parser.add_argument(
@@ -158,25 +175,25 @@ def parse_args() -> argparse.Namespace:
         default="pixel",
         help="Validation metric used to choose the final mask threshold.",
     )
-    parser.add_argument("--bce-weight", type=float, default=1.0)
-    parser.add_argument("--dice-weight", type=float, default=1.0)
+    parser.add_argument("--bce-weight", type=float, default=DEFAULT_BCE_WEIGHT)
+    parser.add_argument("--dice-weight", type=float, default=DEFAULT_DICE_WEIGHT)
     parser.add_argument("--max-pos-weight", type=float, default=30.0)
     parser.add_argument(
         "--hybrid-train-crop-size",
         type=int,
-        default=0,
+        default=DEFAULT_HYBRID_TRAIN_CROP_SIZE,
         help="Crop size used only for hybrid U-Net training. 0 keeps full-frame training.",
     )
     parser.add_argument(
         "--defect-crop-prob",
         type=float,
-        default=0.80,
+        default=DEFAULT_DEFECT_CROP_PROB,
         help="Probability of centering a train crop on a positive mask pixel for bad samples.",
     )
     parser.add_argument(
         "--small-defect-oversample",
         type=float,
-        default=1.0,
+        default=DEFAULT_SMALL_DEFECT_OVERSAMPLE,
         help="Sampler multiplier for bad training samples whose mask area is below --small-defect-area-threshold.",
     )
     parser.add_argument(
@@ -185,12 +202,12 @@ def parse_args() -> argparse.Namespace:
         default=600,
         help="Mask area threshold at 384x384 for treating a bad sample as a small defect.",
     )
-    parser.add_argument("--focal-weight", type=float, default=0.0)
-    parser.add_argument("--focal-alpha", type=float, default=0.75)
-    parser.add_argument("--focal-gamma", type=float, default=2.0)
-    parser.add_argument("--tversky-weight", type=float, default=0.0)
-    parser.add_argument("--tversky-alpha", type=float, default=0.30)
-    parser.add_argument("--tversky-beta", type=float, default=0.70)
+    parser.add_argument("--focal-weight", type=float, default=DEFAULT_FOCAL_WEIGHT)
+    parser.add_argument("--focal-alpha", type=float, default=DEFAULT_FOCAL_ALPHA)
+    parser.add_argument("--focal-gamma", type=float, default=DEFAULT_FOCAL_GAMMA)
+    parser.add_argument("--tversky-weight", type=float, default=DEFAULT_TVERSKY_WEIGHT)
+    parser.add_argument("--tversky-alpha", type=float, default=DEFAULT_TVERSKY_ALPHA)
+    parser.add_argument("--tversky-beta", type=float, default=DEFAULT_TVERSKY_BETA)
     parser.add_argument(
         "--image-score-mode",
         choices=["max", "p99", "area", "blob", "hybrid"],
@@ -241,7 +258,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--postprocess-min-component-area",
         type=int,
-        default=120,
+        default=DEFAULT_POSTPROCESS_MIN_COMPONENT_AREA,
         help="Remove predicted mask components smaller than this area at 384x384, scaled to the active image size.",
     )
     parser.add_argument(
@@ -253,7 +270,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fallback-mask-source",
         choices=["none", "base_if_empty", "base_if_small", "patchcore_if_empty", "patchcore_if_small"],
-        default="none",
+        default=DEFAULT_FALLBACK_MASK_SOURCE,
         help="Use the base anomaly map as a localization fallback when the segmentation mask is empty/small.",
     )
     parser.add_argument(
@@ -770,6 +787,13 @@ def read_rgb(path: Path, image_size: tuple[int, int]) -> Any:
     return arr.astype(np.float32) / 255.0
 
 
+def read_rgb_native(path: Path) -> Any:
+    import numpy as np
+    from PIL import Image
+
+    return np.array(Image.open(path).convert("RGB")).astype(np.float32) / 255.0
+
+
 def read_mask(path: Path, image_size: tuple[int, int]) -> Any:
     import cv2
     import numpy as np
@@ -780,6 +804,13 @@ def read_mask(path: Path, image_size: tuple[int, int]) -> Any:
     if arr.shape[:2] != (target_h, target_w):
         arr = cv2.resize(arr, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
     return (arr > 0).astype(np.float32)
+
+
+def read_mask_native(path: Path) -> Any:
+    import numpy as np
+    from PIL import Image
+
+    return (np.array(Image.open(path).convert("L")) > 0).astype(np.float32)
 
 
 def read_map(path: Path, image_size: tuple[int, int], map_low: float, map_high: float) -> Any:
@@ -795,6 +826,35 @@ def read_map(path: Path, image_size: tuple[int, int], map_low: float, map_high: 
         return np.zeros((target_h, target_w), dtype=np.float32)
     arr = (arr - map_low) / (map_high - map_low)
     return np.clip(arr, 0.0, 1.0).astype(np.float32)
+
+
+def read_map_for_shape(path: Path, target_hw: tuple[int, int], map_low: float, map_high: float) -> Any:
+    import cv2
+    import numpy as np
+
+    arr = np.load(path).astype(np.float32)
+    arr = np.squeeze(arr)
+    target_h, target_w = target_hw
+    if arr.shape[:2] != (target_h, target_w):
+        arr = cv2.resize(arr, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    if map_high <= map_low:
+        return np.zeros((target_h, target_w), dtype=np.float32)
+    arr = (arr - map_low) / (map_high - map_low)
+    return np.clip(arr, 0.0, 1.0).astype(np.float32)
+
+
+def resize_sample_to_image_size(rgb: Any, anomaly: Any, mask: Any, image_size: tuple[int, int]) -> tuple[Any, Any, Any]:
+    import cv2
+    import numpy as np
+
+    target_h, target_w = image_size
+    if rgb.shape[:2] == (target_h, target_w):
+        return rgb, anomaly, mask
+    return (
+        cv2.resize(rgb, (target_w, target_h), interpolation=cv2.INTER_AREA).astype(np.float32),
+        cv2.resize(anomaly, (target_w, target_h), interpolation=cv2.INTER_LINEAR).astype(np.float32),
+        (cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST) > 0.5).astype(np.float32),
+    )
 
 
 def compute_map_range(samples: list[HybridSample]) -> tuple[float, float]:
@@ -888,11 +948,10 @@ class HybridMapDataset:
         import torch
 
         sample = self.samples[index]
-        rgb = read_rgb(sample.image_path, self.image_size)
-        anomaly = read_map(sample.map_path, self.image_size, self.map_low, self.map_high)
-        mask = read_mask(sample.mask_path, self.image_size)
-
         if self.train_crop_size > 0:
+            rgb = read_rgb_native(sample.image_path)
+            mask = read_mask_native(sample.mask_path)
+            anomaly = read_map_for_shape(sample.map_path, rgb.shape[:2], self.map_low, self.map_high)
             rgb, anomaly, mask = apply_train_crop(
                 rgb,
                 anomaly,
@@ -901,6 +960,11 @@ class HybridMapDataset:
                 defect_crop_prob=self.defect_crop_prob,
                 label=sample.label,
             )
+            rgb, anomaly, mask = resize_sample_to_image_size(rgb, anomaly, mask, self.image_size)
+        else:
+            rgb = read_rgb(sample.image_path, self.image_size)
+            anomaly = read_map(sample.map_path, self.image_size, self.map_low, self.map_high)
+            mask = read_mask(sample.mask_path, self.image_size)
 
         if self.augment:
             if random.random() < 0.5:
@@ -1741,6 +1805,341 @@ def evaluate_model(
     return report, rows
 
 
+def tile_starts(length: int, tile: int, stride: int) -> list[int]:
+    if length <= tile:
+        return [0]
+    starts = list(range(0, length - tile + 1, stride))
+    last = length - tile
+    if not starts or starts[-1] != last:
+        starts.append(last)
+    return sorted(dict.fromkeys(starts))
+
+
+def tile_boxes(shape_hw: tuple[int, int], tile_hw: tuple[int, int]) -> list[tuple[int, int, int, int]]:
+    height, width = shape_hw
+    tile_h = min(tile_hw[0], height)
+    tile_w = min(tile_hw[1], width)
+    stride_h = max(1, tile_h - min(128, max(0, tile_h // 2)))
+    stride_w = max(1, tile_w - min(128, max(0, tile_w // 2)))
+    return [
+        (y, min(y + tile_h, height), x, min(x + tile_w, width))
+        for y in tile_starts(height, tile_h, stride_h)
+        for x in tile_starts(width, tile_w, stride_w)
+    ]
+
+
+def predict_sample_tiled(
+    model: Any,
+    sample: HybridSample,
+    *,
+    image_size: tuple[int, int],
+    map_range: tuple[float, float],
+    device: Any,
+    batch_size: int,
+) -> tuple[Any, Any, Any, Any]:
+    import cv2
+    import numpy as np
+    import torch
+
+    rgb = read_rgb_native(sample.image_path)
+    target = read_mask_native(sample.mask_path)
+    anomaly = read_map_for_shape(sample.map_path, rgb.shape[:2], map_range[0], map_range[1])
+    height, width = rgb.shape[:2]
+    prob_sum = np.zeros((height, width), dtype=np.float32)
+    prob_count = np.zeros((height, width), dtype=np.float32)
+    boxes = tile_boxes((height, width), image_size)
+
+    prepared: list[tuple[Any, tuple[int, int, int, int], tuple[int, int]]] = []
+    for y1, y2, x1, x2 in boxes:
+        rgb_tile = rgb[y1:y2, x1:x2]
+        anomaly_tile = anomaly[y1:y2, x1:x2]
+        original_hw = rgb_tile.shape[:2]
+        if original_hw != image_size:
+            target_h, target_w = image_size
+            rgb_tile = cv2.resize(rgb_tile, (target_w, target_h), interpolation=cv2.INTER_AREA).astype(np.float32)
+            anomaly_tile = cv2.resize(anomaly_tile, (target_w, target_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        x = np.concatenate([np.transpose(rgb_tile, (2, 0, 1)), anomaly_tile[None, ...]], axis=0)
+        prepared.append((x, (y1, y2, x1, x2), original_hw))
+
+    with torch.no_grad():
+        for start in range(0, len(prepared), max(1, batch_size)):
+            batch = prepared[start : start + max(1, batch_size)]
+            x = torch.from_numpy(np.stack([item[0] for item in batch], axis=0)).float().to(device, non_blocking=True)
+            probs = torch.sigmoid(model(x)).detach().cpu().numpy()[:, 0]
+            for prob, (_, (y1, y2, x1, x2), original_hw) in zip(probs, batch, strict=False):
+                if prob.shape[:2] != original_hw:
+                    prob = cv2.resize(prob, (original_hw[1], original_hw[0]), interpolation=cv2.INTER_LINEAR)
+                prob_sum[y1:y2, x1:x2] += prob.astype(np.float32, copy=False)
+                prob_count[y1:y2, x1:x2] += 1.0
+
+    return prob_sum / np.maximum(prob_count, 1.0), rgb, anomaly, target
+
+
+def evaluate_samples_tiled(
+    model: Any,
+    samples: list[HybridSample],
+    *,
+    image_size: tuple[int, int],
+    map_range: tuple[float, float],
+    batch_size: int,
+    device: Any,
+    mask_threshold: float,
+    image_threshold: float | None,
+    patchcore_image_threshold: float | None,
+    image_decision_source: str,
+    patchcore_score_column: str,
+    patchcore_threshold_min_recall: float | None,
+    patchcore_threshold_min_specificity: float | None,
+    image_score_mode: str,
+    image_p99_weight: float,
+    image_area_weight: float,
+    image_blob_weight: float,
+    postprocess_min_component_area: int,
+    postprocess_object_edge_ignore_px: int,
+    fallback_mask_source: str,
+    fallback_min_unet_area_fraction: float,
+    fallback_patchcore_percentile: float,
+    fallback_patchcore_min_value: float,
+    fallback_max_area_fraction: float,
+    image_threshold_min: float | None,
+    image_threshold_max: float | None,
+    save_dir: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    import numpy as np
+    from PIL import Image
+
+    image_decision_source = normalize_image_decision_source(image_decision_source)
+    fallback_mask_source = normalize_fallback_mask_source(fallback_mask_source)
+    model.eval()
+    labels: list[int] = []
+    unet_scores: list[float] = []
+    patchcore_scores: list[float] = []
+    rows: list[dict[str, Any]] = []
+    global_tp = global_fp = global_fn = 0
+    bad_tp = bad_fp = bad_fn = 0
+    per_image_dice: list[float] = []
+    per_image_iou: list[float] = []
+    per_bad_image_dice: list[float] = []
+    per_bad_image_iou: list[float] = []
+    fallback_used_count = 0
+
+    if save_dir is not None:
+        (save_dir / "pred_masks").mkdir(parents=True, exist_ok=True)
+        (save_dir / "pred_overlays").mkdir(parents=True, exist_ok=True)
+
+    for sample in samples:
+        prob, rgb, anomaly_map, target = predict_sample_tiled(
+            model,
+            sample,
+            image_size=image_size,
+            map_range=map_range,
+            device=device,
+            batch_size=batch_size,
+        )
+        unet_post = postprocess_probability_mask(
+            prob,
+            mask_threshold=mask_threshold,
+            min_component_area=postprocess_min_component_area,
+            edge_ignore_px=postprocess_object_edge_ignore_px,
+            rgb=rgb,
+        )
+        unet_area_fraction = float(unet_post["area_fraction"])
+        unet_blob_fraction = float(unet_post["largest_blob_fraction"])
+        unet_score = image_score_from_prob(
+            prob,
+            mode=image_score_mode,
+            p99_weight=image_p99_weight,
+            area_weight=image_area_weight,
+            blob_weight=image_blob_weight,
+            area_fraction=unet_area_fraction,
+            blob_fraction=unet_blob_fraction,
+        )
+        patchcore_score = (
+            float(sample.patchcore_model_pred_score)
+            if patchcore_score_column == "model_pred_score"
+            else float(sample.patchcore_pred_score)
+        )
+        label = int(sample.label)
+        if use_base_image_decision(image_decision_source):
+            final_score = patchcore_score
+            final_threshold = patchcore_image_threshold
+        else:
+            final_score = unet_score
+            final_threshold = image_threshold
+        pred_label = "" if final_threshold is None else int(final_score >= final_threshold)
+
+        post = unet_post
+        mask_source = "unet"
+        fallback_used = False
+        fallback_threshold: float | str = ""
+        fallback_candidate_area: float | str = ""
+        fallback_candidate_component_count: int | str = ""
+        fallback_skipped_by_area_cap = False
+        if should_use_patchcore_fallback(
+            fallback_mask_source=fallback_mask_source,
+            pred_label=pred_label,
+            unet_post=unet_post,
+            fallback_min_unet_area_fraction=fallback_min_unet_area_fraction,
+        ):
+            fallback_post = postprocess_patchcore_fallback_mask(
+                anomaly_map,
+                percentile=fallback_patchcore_percentile,
+                min_value=fallback_patchcore_min_value,
+                max_area_fraction=fallback_max_area_fraction,
+                min_component_area=postprocess_min_component_area,
+                edge_ignore_px=postprocess_object_edge_ignore_px,
+                rgb=rgb,
+            )
+            fallback_threshold = float(fallback_post["fallback_threshold"])
+            fallback_candidate_area = float(fallback_post["area_fraction"])
+            fallback_candidate_component_count = int(fallback_post["component_count"])
+            fallback_skipped_by_area_cap = bool(fallback_post["fallback_skipped_by_area_cap"])
+            if fallback_candidate_component_count > 0 and not fallback_skipped_by_area_cap:
+                post = fallback_post
+                mask_source = "base_fallback"
+                fallback_used = True
+                fallback_used_count += 1
+
+        pred_mask = post["mask"]
+        gt_mask = target >= 0.5
+        tp, fp, fn = pixel_stats(pred_mask, gt_mask)
+        global_tp += tp
+        global_fp += fp
+        global_fn += fn
+        if label == 1:
+            bad_tp += tp
+            bad_fp += fp
+            bad_fn += fn
+        dice = safe_dice(tp, fp, fn)
+        iou = safe_iou(tp, fp, fn)
+        area_fraction = float(post["area_fraction"])
+        blob_fraction = float(post["largest_blob_fraction"])
+        labels.append(label)
+        unet_scores.append(unet_score)
+        patchcore_scores.append(patchcore_score)
+        per_image_dice.append(dice)
+        per_image_iou.append(iou)
+        if label == 1:
+            per_bad_image_dice.append(dice)
+            per_bad_image_iou.append(iou)
+
+        pred_mask_rel = ""
+        overlay_rel = ""
+        if save_dir is not None:
+            stem = f"{len(rows):04d}_{Path(sample.name).stem}"
+            mask_path = save_dir / "pred_masks" / f"{stem}.png"
+            overlay_path = save_dir / "pred_overlays" / f"{stem}.png"
+            Image.fromarray((pred_mask.astype(np.uint8) * 255)).save(mask_path)
+            overlay = np.clip(rgb * 255.0, 0, 255).astype(np.float32)
+            overlay[pred_mask] = overlay[pred_mask] * 0.35 + np.array([255, 40, 40], dtype=np.float32) * 0.65
+            Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8)).save(overlay_path)
+            pred_mask_rel = mask_path.relative_to(save_dir).as_posix()
+            overlay_rel = overlay_path.relative_to(save_dir).as_posix()
+
+        rows.append(
+            {
+                "image_name": sample.name,
+                "gt_label": "bad" if label else "good",
+                "pred_label": pred_label,
+                "correct": "" if pred_label == "" else bool(pred_label == label),
+                "image_score": final_score,
+                "final_image_score": final_score,
+                "unet_image_score": unet_score,
+                "base_image_score": patchcore_score,
+                "patchcore_image_score": patchcore_score,
+                "image_decision_source": image_decision_source,
+                "base_score_column": patchcore_score_column,
+                "patchcore_score_column": patchcore_score_column,
+                "mask_source": mask_source,
+                "fallback_used": fallback_used,
+                "fallback_threshold": fallback_threshold,
+                "fallback_candidate_area_fraction": fallback_candidate_area,
+                "fallback_candidate_component_count": fallback_candidate_component_count,
+                "fallback_skipped_by_area_cap": fallback_skipped_by_area_cap,
+                "mask_threshold": mask_threshold,
+                "image_threshold": "" if final_threshold is None else final_threshold,
+                "unet_image_threshold": "" if image_threshold is None else image_threshold,
+                "base_image_threshold": "" if patchcore_image_threshold is None else patchcore_image_threshold,
+                "patchcore_image_threshold": "" if patchcore_image_threshold is None else patchcore_image_threshold,
+                "unet_raw_area_fraction": unet_post["raw_area_fraction"],
+                "unet_pred_area_fraction": unet_area_fraction,
+                "unet_largest_blob_fraction": unet_blob_fraction,
+                "unet_component_count": unet_post["component_count"],
+                "unet_largest_component_area": unet_post["largest_component_area"],
+                "raw_area_fraction": post["raw_area_fraction"],
+                "pred_area_fraction": area_fraction,
+                "largest_blob_fraction": blob_fraction,
+                "component_count": post["component_count"],
+                "largest_component_area": post["largest_component_area"],
+                "removed_small_area": post["removed_small_area"],
+                "edge_suppressed_pixels": post["edge_suppressed_pixels"],
+                "effective_min_component_area": post["effective_min_component_area"],
+                "pixel_dice": dice,
+                "pixel_iou": iou,
+                "pred_mask_rel": pred_mask_rel,
+                "pred_overlay_rel": overlay_rel,
+            },
+        )
+
+    unet_image_report = image_metrics(labels, unet_scores, image_threshold, image_threshold_min, image_threshold_max) if labels else {}
+    patchcore_image_report = (
+        image_metrics(
+            labels,
+            patchcore_scores,
+            patchcore_image_threshold,
+            min_recall=patchcore_threshold_min_recall,
+            min_specificity=patchcore_threshold_min_specificity,
+        )
+        if labels
+        else {}
+    )
+    image_report = patchcore_image_report if use_base_image_decision(image_decision_source) else unet_image_report
+    report = {
+        "num_samples": len(labels),
+        "mask_threshold": mask_threshold,
+        "image_threshold": patchcore_image_threshold if use_base_image_decision(image_decision_source) else image_threshold,
+        "unet_image_threshold": image_threshold,
+        "base_image_threshold": patchcore_image_threshold,
+        "patchcore_image_threshold": patchcore_image_threshold,
+        "image_decision_source": image_decision_source,
+        "base_score_column": patchcore_score_column,
+        "patchcore_score_column": patchcore_score_column,
+        "patchcore_threshold_min_recall": patchcore_threshold_min_recall,
+        "patchcore_threshold_min_specificity": patchcore_threshold_min_specificity,
+        "image_score_mode": image_score_mode,
+        "image_p99_weight": image_p99_weight,
+        "image_area_weight": image_area_weight,
+        "image_blob_weight": image_blob_weight,
+        "postprocess_min_component_area": postprocess_min_component_area,
+        "postprocess_object_edge_ignore_px": postprocess_object_edge_ignore_px,
+        "image_threshold_min": image_threshold_min,
+        "image_threshold_max": image_threshold_max,
+        "pixel_dice_global": safe_dice(global_tp, global_fp, global_fn),
+        "pixel_iou_global": safe_iou(global_tp, global_fp, global_fn),
+        "bad_pixel_dice_global": safe_dice(bad_tp, bad_fp, bad_fn),
+        "bad_pixel_iou_global": safe_iou(bad_tp, bad_fp, bad_fn),
+        "pixel_dice_mean_image": float(np.mean(per_image_dice)) if per_image_dice else None,
+        "pixel_iou_mean_image": float(np.mean(per_image_iou)) if per_image_iou else None,
+        "bad_pixel_dice_mean_image": float(np.mean(per_bad_image_dice)) if per_bad_image_dice else None,
+        "bad_pixel_iou_mean_image": float(np.mean(per_bad_image_iou)) if per_bad_image_iou else None,
+        "pixel_tp": global_tp,
+        "pixel_fp": global_fp,
+        "pixel_fn": global_fn,
+        "bad_pixel_tp": bad_tp,
+        "bad_pixel_fp": bad_fp,
+        "bad_pixel_fn": bad_fn,
+        "fallback_mask_source": fallback_mask_source,
+        "fallback_used_count": fallback_used_count,
+        "image": image_report,
+        "unet_image": unet_image_report,
+        "base_image": patchcore_image_report,
+        "patchcore_image": patchcore_image_report,
+        "tiled_inference": True,
+        "tile_size": f"{image_size[0]}x{image_size[1]}",
+    }
+    return report, rows
+
+
 def train_one_epoch(
     model: Any,
     loader: Any,
@@ -2006,7 +2405,37 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             f"{fallback_mask_source}, p{args.fallback_patchcore_percentile:.2f}, "
             f"min_unet_area={args.fallback_min_unet_area_fraction:.6f}",
         )
+    use_tiled_eval = args.hybrid_train_crop_size > 0
+    print(f"[INFO] Eval mode    : {'tiled native-resolution' if use_tiled_eval else 'resized full-frame'}")
     print("=" * 80)
+
+    def run_eval(
+        samples: list[HybridSample],
+        loader: Any,
+        *,
+        mask_threshold: float,
+        image_threshold: float | None,
+        patchcore_image_threshold: float | None,
+        save_dir: Path | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        kwargs = {
+            "device": device,
+            "mask_threshold": mask_threshold,
+            "image_threshold": image_threshold,
+            "patchcore_image_threshold": patchcore_image_threshold,
+            **evaluate_kwargs(args),
+        }
+        if use_tiled_eval:
+            return evaluate_samples_tiled(
+                model,
+                samples,
+                image_size=image_size,
+                map_range=map_range,
+                batch_size=args.hybrid_batch_size,
+                **kwargs,
+                save_dir=save_dir,
+            )
+        return evaluate_model(model, loader, **kwargs, save_dir=save_dir)
 
     if not args.eval_only:
         for epoch in range(1, args.hybrid_epochs + 1):
@@ -2028,14 +2457,12 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
                 use_amp=use_amp,
             )
             scheduler.step()
-            val_report, _ = evaluate_model(
-                model,
+            val_report, _ = run_eval(
+                val_samples,
                 val_loader,
-                device=device,
                 mask_threshold=0.5,
                 image_threshold=None,
                 patchcore_image_threshold=None,
-                **evaluate_kwargs(args),
             )
             val_image = val_report["unet_image"]
             val_score = segmentation_checkpoint_score(val_report, args.checkpoint_selection)
@@ -2085,60 +2512,50 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
     best_mask_threshold = 0.5
     best_mask_score = -math.inf
     for candidate in [round(value, 2) for value in np.linspace(0.05, 0.95, 19)]:
-        report, _ = evaluate_model(
-            model,
+        report, _ = run_eval(
+            val_samples,
             val_loader,
-            device=device,
             mask_threshold=float(candidate),
             image_threshold=None,
             patchcore_image_threshold=None,
-            **evaluate_kwargs(args),
         )
         score = mask_threshold_score(report, args.mask_threshold_selection)
         if score > best_mask_score:
             best_mask_score = score
             best_mask_threshold = float(candidate)
 
-    val_report_for_threshold, _ = evaluate_model(
-        model,
+    val_report_for_threshold, _ = run_eval(
+        val_samples,
         val_loader,
-        device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=None,
         patchcore_image_threshold=None,
-        **evaluate_kwargs(args),
     )
     unet_image_threshold = float(val_report_for_threshold["unet_image"]["threshold"])
     patchcore_image_threshold = float(val_report_for_threshold["patchcore_image"]["threshold"])
     final_image_threshold = patchcore_image_threshold if use_base_image_decision(decision_source) else unet_image_threshold
 
-    train_report, train_rows = evaluate_model(
-        model,
+    train_report, train_rows = run_eval(
+        train_samples,
         train_eval_loader,
-        device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=unet_image_threshold,
         patchcore_image_threshold=patchcore_image_threshold,
-        **evaluate_kwargs(args),
     )
-    val_report, val_rows = evaluate_model(
-        model,
+    val_report, val_rows = run_eval(
+        val_samples,
         val_loader,
-        device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=unet_image_threshold,
         patchcore_image_threshold=patchcore_image_threshold,
-        **evaluate_kwargs(args),
     )
     test_save_dir = output_dir / "test_visuals" if args.save_test_maps else None
-    test_report, test_rows = evaluate_model(
-        model,
+    test_report, test_rows = run_eval(
+        test_samples,
         test_loader,
-        device=device,
         mask_threshold=best_mask_threshold,
         image_threshold=unet_image_threshold,
         patchcore_image_threshold=patchcore_image_threshold,
-        **evaluate_kwargs(args),
         save_dir=test_save_dir,
     )
 
@@ -2196,6 +2613,10 @@ def train_hybrid_model(args: argparse.Namespace, image_size: tuple[int, int], ma
             "tversky_weight": args.tversky_weight,
             "tversky_alpha": args.tversky_alpha,
             "tversky_beta": args.tversky_beta,
+        },
+        "evaluation": {
+            "tiled_native_resolution": use_tiled_eval,
+            "tile_size": f"{image_size[0]}x{image_size[1]}" if use_tiled_eval else None,
         },
         "postprocessing": {
             "image_p99_weight": args.image_p99_weight,

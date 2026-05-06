@@ -15,34 +15,26 @@ This is the recommended product-style flow for small defects: PatchCore decides 
 the segmentation model explains where the defect is. To compare against the older behavior where mask scores decide image-level
 labels, pass `--image-decision-source unet`.
 
+The default hybrid settings are now the best-fast profile:
+
+- `512x512` model input.
+- FPN segmentation head with an `efficientnet-b0` ImageNet encoder.
+- Defect-centered crop training directly on native-resolution images, plus small-defect oversampling, focal loss, and Tversky loss.
+- Validation/test segmentation uses tiled native-resolution inference and stitches the probability map before thresholding.
+- PatchCore keeps the image-level good/bad decision; segmentation is used for localization.
+- Base-map fallback is enabled when the segmentation mask is too small.
+
+Install the segmentation dependency once before running this profile:
+
+```bash
+python3 -m pip install segmentation-models-pytorch timm
+```
+
 Run the full workflow on the server GPU:
 
 ```bash
 python3 hybrid_demo.py \
-  --dataset-root ./VisA \
-  --category candle \
-  --train-patchcore \
-  --patchcore-results-dir ./runs_visa_candle_patchcore \
-  --patchcore-coreset-ratio 0.10 \
-  --patchcore-layers layer2 layer3 \
-  --patchcore-num-neighbors 9 \
-  --patchcore-precision float16 \
-  --image-size 384 \
-  --train-good 800 \
-  --train-bad 60 \
-  --val-good 50 \
-  --val-bad 20 \
-  --test-good 50 \
-  --test-bad 20 \
-  --hybrid-epochs 40 \
-  --hybrid-batch-size 8 \
-  --image-decision-source patchcore \
-  --patchcore-score-column pred_score \
-  --patchcore-threshold-min-recall 0.90 \
-  --patchcore-threshold-min-specificity 0.92 \
-  --num-workers 4 \
-  --accelerator gpu \
-  --devices 1 \
+  --train-base-model \
   --save-test-maps \
   --clean
 ```
@@ -51,80 +43,27 @@ If PatchCore is already trained, omit `--train-patchcore` and point to the exist
 
 ```bash
 python3 hybrid_demo.py \
-  --dataset-root ./VisA \
-  --category candle \
-  --patchcore-results-dir ./runs_visa_candle_patchcore \
-  --image-size 384 \
-  --hybrid-epochs 40 \
-  --hybrid-batch-size 8 \
-  --image-decision-source patchcore \
-  --patchcore-score-column pred_score \
-  --patchcore-threshold-min-recall 0.90 \
-  --patchcore-threshold-min-specificity 0.92 \
-  --num-workers 4 \
-  --accelerator gpu \
-  --devices 1 \
   --save-test-maps
 ```
 
 ## Pretrained Segmentation Training
 
-Install the segmentation dependency once on the server:
-
-```bash
-python3 -m pip install segmentation-models-pytorch timm
-```
-
-The strongest A4000-friendly starting point is FPN with a ResNet34 ImageNet encoder. It improves the mask model while
-keeping PatchCore as the image-level decision source:
+The default pretrained segmentation model is FPN with an EfficientNet-B0 ImageNet encoder. Reuse existing prepared
+splits and maps with a short command:
 
 ```bash
 python3 hybrid_demo.py \
-  --dataset-root ./VisA \
-  --category candle \
   --split-dir ./hybrid_result_visa_candle/hybrid_inputs_visa_candle \
   --patchcore-results-dir ./hybrid_result_visa_candle/runs_visa_candle_patchcore \
   --maps-dir ./hybrid_result_visa_candle/hybrid_maps_visa_candle_patchcore \
-  --output-dir ./hybrid_result_visa_candle/hybrid_outputs_visa_candle_fpn \
+  --output-dir ./hybrid_result_visa_candle/hybrid_outputs_visa_candle_best_fast \
   --skip-prepare \
   --skip-map-generation \
-  --image-size 384 \
-  --seg-arch fpn \
-  --seg-encoder resnet34 \
-  --seg-encoder-weights imagenet \
-  --checkpoint-selection pixel \
-  --mask-threshold-selection pixel \
-  --hybrid-epochs 80 \
-  --hybrid-batch-size 4 \
-  --hybrid-train-crop-size 256 \
-  --defect-crop-prob 0.90 \
-  --small-defect-oversample 4.0 \
-  --small-defect-area-threshold 600 \
-  --bce-weight 0.5 \
-  --dice-weight 1.0 \
-  --focal-weight 0.75 \
-  --focal-alpha 0.8 \
-  --focal-gamma 2.0 \
-  --tversky-weight 0.75 \
-  --tversky-alpha 0.3 \
-  --tversky-beta 0.7 \
-  --postprocess-min-component-area 40 \
-  --fallback-mask-source patchcore_if_small \
-  --fallback-min-unet-area-fraction 0.001 \
-  --fallback-patchcore-percentile 99.7 \
-  --fallback-max-area-fraction 0.02 \
-  --image-decision-source patchcore \
-  --patchcore-score-column pred_score \
-  --patchcore-threshold-min-recall 0.90 \
-  --patchcore-threshold-min-specificity 0.92 \
-  --num-workers 4 \
-  --accelerator gpu \
-  --devices 1 \
   --save-test-maps
 ```
 
-If the server has no internet for ImageNet weights, use `--seg-encoder-weights none`. If FPN fits comfortably, try
-`--seg-arch unetpp` next; it is heavier but can produce sharper masks.
+If the server has no internet for ImageNet weights, use `--seg-encoder-weights none`. U-Net++ and larger encoders remain
+available for experiments, but they are no longer the recommended default because they are much slower.
 
 ## Small-defect Segmentation Training
 
@@ -166,9 +105,8 @@ python3 hybrid_demo.py \
   --save-test-maps
 ```
 
-For an RTX A4000 16 GB, start with `--image-size 384`, PatchCore `float16`, `coreset 0.10`, U-Net
-`--hybrid-batch-size 8`, and crop training at `256`. If VRAM is stable, try `--hybrid-batch-size 16` for the crop-only
-training pass. The validation and test passes still use the full image size; crops affect only training batches.
+For an RTX A4000 16 GB, the default `512x512`, FPN EfficientNet-B0, batch size `4`, native-resolution crop training, and
+tiled native-resolution validation/test profile is the recommended starting point.
 
 Important outputs:
 

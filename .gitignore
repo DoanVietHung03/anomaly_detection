@@ -20,3 +20,4 @@ hybrid_outputs_*/
 results/
 runs_*/
 zipped_output/
+*.zip
