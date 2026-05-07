@@ -18,6 +18,7 @@ hybrid_inputs_*/
 hybrid_maps_*/
 hybrid_outputs_*/
 results/
+efficientad_*/
 runs_*/
 zipped_output/
 *.zip
