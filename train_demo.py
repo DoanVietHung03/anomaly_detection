@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -203,6 +204,7 @@ def parse_args() -> argparse.Namespace:
         help="Lightning devices value, e.g. auto/1/[0].",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--clean", action="store_true", help="Remove --results-dir before training.")
     return parser.parse_args()
 
 
@@ -512,6 +514,18 @@ def make_json_safe(obj: Any) -> Any:
     return str(obj)
 
 
+def clean_results_dir(results_dir: Path, dataset_root: Path) -> None:
+    target = results_dir.resolve()
+    cwd = Path.cwd().resolve()
+    dataset = dataset_root.resolve()
+    if target == cwd:
+        raise SystemExit("--clean refuses to remove the current working directory. Use a dedicated --results-dir.")
+    if target == dataset:
+        raise SystemExit("--clean refuses to remove --dataset-root. Use a dedicated --results-dir.")
+    if target.exists():
+        shutil.rmtree(target)
+
+
 def main() -> None:
     args = parse_args()
     (
@@ -529,6 +543,8 @@ def main() -> None:
 
     if args.results_dir is None:
         args.results_dir = Path(f"./runs_{args.model}_{args.dataset}_{args.category}")
+    if args.clean:
+        clean_results_dir(args.results_dir, args.dataset_root)
     args.results_dir.mkdir(parents=True, exist_ok=True)
     seed_everything(args.seed, workers=True)
     image_size = resolve_image_size(args)
